@@ -1,0 +1,14 @@
+{
+  "name": "zuglak-studio",
+  "version": "1.4.0",
+  "private": true,
+  "description": "Helyben futó 2D otthontervező IKEA bútorkatalógussal",
+  "scripts": {
+    "test": "node --test",
+    "test:ui": "node tests/ui-smoke.mjs",
+    "check": "node --check core.js && node --check ikea-catalog.js && node --check app.js && node --test"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

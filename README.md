@@ -1,30 +1,74 @@
-# Zuglak Studio — MVP 1.2
+# Zuglak Studio 1.4
 
-Három eredeti, feltöltött szobaalaprajzot tartalmazó, helyben futó, 2D berendezéstervező.
+Privát, helyben futó 2D otthontervező három eredeti alaprajzzal, saját alaprajzokkal és integrált IKEA-bútorkatalógussal.
 
 ## Indítás
 
-1. Csomagold ki a ZIP-et teljes egészében.
-2. Windows alatt indítsd az `INDITAS_WINDOWS.bat` fájlt (Python 3 kell hozzá).
-3. Böngészőben nyisd meg: http://localhost:8765
+1. Csomagold ki a projektet teljes egészében.
+2. Windows alatt indítsd az `INDITAS_WINDOWS.bat` fájlt (Python 3 szükséges).
+3. Nyisd meg a böngészőben a <http://localhost:8765> címet.
 
-Alternatíva: a mappában `python -m http.server 8765`, majd a fenti URL.
+Alternatíva a projekt mappájából:
 
-## Újdonságok az 1.2-ben
+```powershell
+python -m http.server 8765
+```
 
-- Újratervezett Zuglak Studio felület, világos természetes színpaletta
-- Bútorkereső
-- Visszavonás és újra (max. 60 állapot, egy böngészős munkameneten belül)
-- 5 cm-es igazítás bekapcsolható húzás után
-- Ctrl+D: kijelölt bútor másolata; Delete: törlés
-- Nyilak: 1 cm-es finommozgatás, Shift + nyilak: 10 cm
-- Ctrl+Z / Ctrl+Y: visszavonás / újra
-- Az eredeti 1.1 adatok a `zuglak-v2` böngésző-tárhelyről változatlanul betöltődnek, ha ugyanazon a címen futtatod.
+Az alkalmazásnak nincs futásidejű külső függősége és nincs szüksége internetkapcsolatra. A külső IKEA-termékoldal csak akkor nyílik meg, ha a felhasználó rákattint a hivatkozásra.
 
-## Korlátok
+## Újdonságok az 1.4-ben
 
-A feltöltött szobaképek egyes rajzolt szakaszai nem pontosan arányosak a felírt centiméterekkel. A v1.2 **becsült, egy referencia-szakasz alapján beállított méretarányt** használ, nem teljes értékű geometriailag rekonstruált CAD alaprajzot. Bútorvásárlás előtt ellenőrizzétek a tényleges méreteket.
+- Külön IKEA-katalógus név- és cikkszámkereséssel, hat kategória szűrőjével.
+- Ellenőrzött kezdőkatalógus kanapékkal, fotelekkel, gardróbokkal, ággyal, asztalokkal, székkel és tárolóbútorokkal.
+- IKEA Hungary terméklink importálása:
+  - a helyi katalógusban szereplő terméket automatikusan felismeri;
+  - más terméknél az URL-ből csak a biztosan kiolvasható adatokat tölti elő;
+  - a hiányzó méreteket kötelező kézzel, a hivatalos termékoldal alapján megadni.
+- Külön, tartós Kedvencek gyűjtemény.
+- Részletesebb, saját felülnézeti vektoros bútorrajzok, IKEA-fotók másolása nélkül.
+- Az eredeti termékméret megjelenik a tulajdonságpanelen, és látható, ha a terven átméretezték.
+- Saját PNG/JPEG/WebP alaprajz külön helyiségként feltölthető, majd kalibrálható.
+- A JSON-mentés a kedvenceket és a saját alaprajzokat is tartalmazza.
 
-A mentés egy böngészőn és azonos webcímen belül működik, nem szinkronizál eszközök között. Időnként töltsétek le a JSON tervmentést. A visszavonási előzmény csak az adott munkamenetben él.
+## IKEA-adatok és importbiztonság
 
-A felület helyben fut, nem használ külső könyvtárakat, nem küld adatokat szerverre.
+A kurált termékadatok az `ikea-catalog.js` fájlban, az alkalmazáslogikától elkülönítve találhatók. A termékek külső, összeszerelt méreteit és cikkszámait a hivatkozott nyilvános IKEA Hungary termékoldalak alapján 2026-10-15-én ellenőriztük.
+
+Az alkalmazás nem végez automatikus scrapinget, nem kerül meg hozzáférési korlátozást, és nem próbál méretet kitalálni. Ismeretlen linknél a név és cikkszám URL-ből történő előkitöltése csak segítség; a felhasználónak kell ellenőriznie és megadnia a hivatalos külső szélességet és mélységet. Az IKEA-termékek elérhetősége és adatai később változhatnak, ezért vásárlás előtt mindig ellenőrizd a hivatkozott termékoldalt.
+
+## Megmaradt szerkesztési funkciók
+
+- három eredeti szobaterv és átnevezhető helyiségek;
+- több berendezési változat helyiségenként;
+- saját alaprajz feltöltése és méretarány-kalibrálás;
+- húzás, forgatás, másolás, átméretezés és törlés;
+- zoom, pásztázás, mérés és 5 cm-es rácshoz igazítás;
+- visszavonás és újra, legfeljebb 60 állapotig az aktuális munkamenetben;
+- helyi automatikus mentés, PNG-export, JSON-mentés és -betöltés.
+
+Gyorsbillentyűk: `Ctrl+D` másolat, `Delete` törlés, nyilak 1 cm-es mozgatás, `Shift` + nyilak 10 cm, `Ctrl+Z` / `Ctrl+Y` visszavonás / újra.
+
+## Adattárolás és kompatibilitás
+
+- Tervek: `localStorage` / `zuglak-v2`.
+- Kedvencek: `localStorage` / `zuglak-favorites-v1`.
+- A korábbi 1.x tervséma változatlan maradt; a régi `zuglak-v2` adatok automatikusan betöltődnek.
+- A saját alaprajz képe a tervvel együtt, helyben tárolódik. A böngészőtárhely védelmében egy feltöltés legfeljebb 3 MB lehet.
+
+A helyi mentés böngészőhöz és webcímhez kötött, eszközök között nem szinkronizál. Rendszeresen készíts JSON-mentést. A program meglévő tervet csak megerősítés után ír felül vagy töröl.
+
+## Fejlesztői ellenőrzés
+
+Node.js 20 vagy újabb verzióval:
+
+```powershell
+npm test
+npm run check
+npm run test:ui
+```
+
+A tesztek lefedik az IKEA URL-feldolgozást, a méretadatok szigorú validálását és megőrzését, a kedvencek tartós tárolását, a hibás adatok izolálását, valamint a régi tervformátum kompatibilitását. A `test:ui` Chrome vagy Edge headless módjában ellenőrzi a katalógust, a keresést, a kedvenceket, az ismert és kézi termékimportot, a bútorműveleteket, a saját alaprajz feltöltését és a tablet-elrendezést. Egyedi böngészőútvonal a `CHROME_PATH` környezeti változóval adható meg.
+
+## Pontossági korlát
+
+Az eredeti szobaképek egyes rajzolt szakaszai nem pontosan arányosak a felírt centiméterekkel. A program egy referencia-szakasz alapján becsült méretarányt használ, nem geometriailag rekonstruált CAD-alaprajzot. Bútorvásárlás előtt ellenőrizd a helyszíni méreteket.

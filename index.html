@@ -1,7 +1,165 @@
-<!doctype html><html lang="hu"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Zuglak Studio — Otthontervező</title><link rel="stylesheet" href="styles.css"></head><body>
-<header><div class="brand"><span class="logo">⌂</span><div><strong>Zuglak</strong><small>STUDIO · Otthonunk tervezője</small></div></div><div class="head-actions"><span class="privacy-pill">● Privát munkaterület</span><span id="saveState">Helyben mentve</span><button id="exportJSON">Terv mentése fájlba</button><label class="button secondary">Terv betöltése <input id="importJSON" type="file" accept=".json,application/json" hidden></label></div></header>
-<div class="workspace"><aside class="left"><h2>Helyiségek</h2><div id="rooms" class="rooms"></div><p class="hint">A három feltöltött rajz külön rendezhető be. A helyiségek neve átírható.</p><div class="divider"></div><div class="side-heading"><h2>Bútorok és tárgyak</h2><span>16 darab</span></div><input id="catalogSearch" class="catalog-search" placeholder="⌕  Bútor keresése..." aria-label="Bútor keresése"><div id="catalog" class="catalog"></div><div class="divider"></div><button class="wide secondary" id="customFurniture">+ Egyedi méretű bútor</button><h3>Működés</h3><p class="hint">Kattints egy tárgyra a hozzáadáshoz. Húzd a helyére; a jobb oldalon állíts méretet és forgatást. Egérgörgő: zoom. Szóköz + húzás: mozgatás.</p></aside>
-<main><div class="toolbar"><div class="tools"><button id="undo" title="Visszavonás (Ctrl+Z)" disabled>↶</button><button id="redo" title="Újra (Ctrl+Y)" disabled>↷</button><span class="tool-separator"></span><button id="modeSelect" class="selected">↖ Kijelölés</button><button id="modeCalibrate">⌁ Méretarány</button><button id="modeMeasure">↔ Mérés</button><button id="modePan">✋ Mozgatás</button></div><div class="tools"><button id="zoomOut" title="Kicsinyítés">−</button><span id="zoomLabel">100%</span><button id="zoomIn" title="Nagyítás">+</button><button id="fit">⤢ Illesztés</button><button id="snap" title="Mozgatáskor igazítás 5 cm-es lépésekhez" aria-pressed="false">⊞ 5 cm rács: ki</button><button id="exportPNG">↓ PNG</button></div></div><div class="accuracy-notice">⚠ A képeken szereplő méretadatok és a rajzolt szakaszok arányai nem mindenhol egyeznek. A bútorok centiméterben méretezhetők, de az elférés ellenőrzéséhez helyszíni mérés javasolt. <label><input type="checkbox" id="showReference" checked> Kalibrációs szakasz mutatása</label></div><div class="stage-wrap" id="stageWrap"><div class="floating-help">✦ Tipp: kattints balra egy bútorra · Del: törlés · Ctrl+D: másolat · nyilak: finommozgatás</div><canvas id="stage"></canvas><div class="status" id="status">Alaprajz betöltése...</div></div><div class="bottom"><span id="scaleInfo">Méretarány nincs beállítva</span><span id="hintMode">Bútor elhelyezéséhez válassz egy elemet bal oldalt.</span></div></main>
-<aside class="right"><div class="side-heading"><h2>Tulajdonságok</h2><button id="renameRoom" title="Helyiség átnevezése">✎</button></div><div id="props"><p class="hint">Válassz ki egy bútort a szerkesztéshez.</p></div><div class="divider"></div><h3>Berendezési változatok</h3><select id="variant"></select><div class="inline"><button id="newVariant">+ Új változat</button><button id="deleteVariant" class="danger">Törlés</button></div><p class="hint">Az egyes helyiségek berendezése külön-külön és több változatban menthető.</p><div class="divider"></div><h3>Biztonsági mentés</h3><p class="hint">Az automatikus mentés csak ebben a böngészőben él. Használjátok rendszeresen a „Terv mentése fájlba” gombot, ha másik eszközre vinnétek át.</p><button class="wide secondary" id="resetRoom">Aktuális változat ürítése</button></aside></div>
-<dialog id="dialog"><form method="dialog" id="dialogForm"><h2 id="dialogTitle"></h2><p id="dialogHint"></p><div id="dialogFields"></div><div class="dialog-actions"><button value="cancel">Mégse</button><button value="ok" id="dialogOk" class="primary">Rendben</button></div></form></dialog>
-<script src="app.js"></script></body></html>
+<!doctype html>
+<html lang="hu">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#244b3e">
+  <title>Zuglak Studio — Otthontervező</title>
+  <link rel="icon" href="assets/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header>
+    <div class="brand">
+      <span class="logo" aria-hidden="true">⌂</span>
+      <div><strong>Zuglak</strong><small>STUDIO · Otthonunk tervezője</small></div>
+    </div>
+    <div class="head-actions">
+      <span class="version-pill">1.4 · IKEA</span>
+      <span class="privacy-pill">● Privát munkaterület</span>
+      <span id="saveState" aria-live="polite">Helyben mentve</span>
+      <button id="exportJSON">Terv mentése fájlba</button>
+      <label class="button secondary">Terv betöltése
+        <input id="importJSON" type="file" accept=".json,application/json" hidden>
+      </label>
+    </div>
+  </header>
+
+  <div class="workspace">
+    <aside class="left">
+      <h2>Helyiségek</h2>
+      <div id="rooms" class="rooms"></div>
+      <div class="room-actions">
+        <label class="button secondary wide">＋ Saját alaprajz
+          <input id="floorPlanUpload" type="file" accept="image/png,image/jpeg,image/webp" hidden>
+        </label>
+      </div>
+      <p class="hint">A három eredeti rajz és a saját feltöltések külön rendezhetők be. A helyiségek neve átírható.</p>
+
+      <div class="divider"></div>
+      <div class="side-heading">
+        <h2>Bútorok és tárgyak</h2>
+        <span id="catalogCount"></span>
+      </div>
+      <div class="catalog-tabs" role="tablist" aria-label="Bútorgyűjtemény">
+        <button type="button" class="selected" data-catalog-tab="ikea" role="tab">IKEA</button>
+        <button type="button" data-catalog-tab="favorites" role="tab">Kedvencek <span id="favoriteCount">0</span></button>
+        <button type="button" data-catalog-tab="basic" role="tab">Alap</button>
+      </div>
+      <input id="catalogSearch" class="catalog-search" placeholder="⌕  Keresés név vagy cikkszám alapján…" aria-label="Bútor keresése">
+      <select id="catalogCategory" class="catalog-filter" aria-label="Kategória"></select>
+      <div id="catalog" class="catalog"></div>
+      <p id="catalogEmpty" class="empty-state" hidden>Nincs találat ebben a gyűjteményben.</p>
+      <div class="catalog-actions">
+        <button class="wide ikea-import" id="importIkea">＋ IKEA termék importálása</button>
+        <button class="wide secondary" id="customFurniture">＋ Egyedi méretű bútor</button>
+      </div>
+
+      <h3>Működés</h3>
+      <p class="hint">Kattints egy tárgyra a hozzáadáshoz. Húzd a helyére; a jobb oldalon állíts méretet és forgatást. Egérgörgő: zoom. Szóköz + húzás: mozgatás.</p>
+    </aside>
+
+    <main>
+      <div class="toolbar">
+        <div class="tools">
+          <button id="undo" title="Visszavonás (Ctrl+Z)" disabled>↶</button>
+          <button id="redo" title="Újra (Ctrl+Y)" disabled>↷</button>
+          <span class="tool-separator"></span>
+          <button id="modeSelect" class="selected">↖ Kijelölés</button>
+          <button id="modeCalibrate">⌁ Méretarány</button>
+          <button id="modeMeasure">↔ Mérés</button>
+          <button id="modePan">✋ Mozgatás</button>
+        </div>
+        <div class="tools">
+          <button id="zoomOut" title="Kicsinyítés">−</button>
+          <span id="zoomLabel">100%</span>
+          <button id="zoomIn" title="Nagyítás">＋</button>
+          <button id="fit">⤢ Illesztés</button>
+          <button id="snap" title="Mozgatáskor igazítás 5 cm-es lépésekhez" aria-pressed="false">⊞ 5 cm rács: ki</button>
+          <button id="exportPNG">↓ PNG</button>
+        </div>
+      </div>
+      <div class="accuracy-notice">
+        ⚠ A képeken szereplő méretadatok és a rajzolt szakaszok arányai nem mindenhol egyeznek. A bútorok centiméterben méretezhetők, de az elférés ellenőrzéséhez helyszíni mérés javasolt.
+        <label><input type="checkbox" id="showReference" checked> Kalibrációs szakasz mutatása</label>
+      </div>
+      <div class="stage-wrap" id="stageWrap">
+        <div class="floating-help">✦ Tipp: kattints balra egy bútorra · Del: törlés · Ctrl+D: másolat · nyilak: finommozgatás</div>
+        <canvas id="stage"></canvas>
+        <div class="status" id="status" aria-live="polite">Alaprajz betöltése…</div>
+      </div>
+      <div class="bottom">
+        <span id="scaleInfo">Méretarány nincs beállítva</span>
+        <span id="hintMode">Bútor elhelyezéséhez válassz egy elemet bal oldalt.</span>
+      </div>
+    </main>
+
+    <aside class="right">
+      <div class="side-heading">
+        <h2>Tulajdonságok</h2>
+        <button id="renameRoom" title="Helyiség átnevezése">✎</button>
+      </div>
+      <div id="props"><p class="hint">Válassz ki egy bútort a szerkesztéshez.</p></div>
+      <div class="divider"></div>
+      <h3>Berendezési változatok</h3>
+      <select id="variant"></select>
+      <div class="inline">
+        <button id="newVariant">＋ Új változat</button>
+        <button id="deleteVariant" class="danger">Törlés</button>
+      </div>
+      <p class="hint">Az egyes helyiségek berendezése külön-külön és több változatban menthető.</p>
+      <div class="divider"></div>
+      <h3>Biztonsági mentés</h3>
+      <p class="hint">Az automatikus mentés csak ebben a böngészőben él. Használjátok rendszeresen a „Terv mentése fájlba” gombot.</p>
+      <button class="wide secondary" id="resetRoom">Aktuális változat ürítése</button>
+    </aside>
+  </div>
+
+  <dialog id="dialog">
+    <form method="dialog" id="dialogForm">
+      <h2 id="dialogTitle"></h2>
+      <p id="dialogHint"></p>
+      <div id="dialogFields"></div>
+      <div class="dialog-actions">
+        <button value="cancel">Mégse</button>
+        <button value="ok" id="dialogOk" class="primary">Rendben</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="ikeaDialog" class="ikea-dialog">
+    <form method="dialog" id="ikeaForm">
+      <div class="dialog-brand"><span>IKEA</span><small>biztonságos termékimport</small></div>
+      <h2>IKEA termék hozzáadása</h2>
+      <p>Illeszd be az IKEA magyar termékoldalának linkjét. A kurált katalógus termékeit automatikusan felismerjük; más terméknél a méreteket az IKEA oldala alapján neked kell megadnod.</p>
+      <div class="field">
+        <label for="ikeaUrl">IKEA Hungary terméklink</label>
+        <div class="url-row"><input id="ikeaUrl" name="productUrl" type="url" placeholder="https://www.ikea.com/hu/hu/p/…" required><button type="button" id="resolveIkea">Ellenőrzés</button></div>
+      </div>
+      <div id="ikeaImportStatus" class="import-status" aria-live="polite">Nem végzünk háttérben webes adatgyűjtést vagy jogosulatlan scrapinget.</div>
+      <a id="ikeaSourceLink" class="source-link" target="_blank" rel="noopener noreferrer" hidden>Hivatalos termékoldal megnyitása ↗</a>
+      <div id="ikeaManualFields" hidden>
+        <div class="field"><label for="ikeaName">Terméknév</label><input id="ikeaName" name="name" required></div>
+        <div class="field"><label for="ikeaProductId">Cikkszám</label><input id="ikeaProductId" name="productId" inputmode="numeric" placeholder="000.000.00" required></div>
+        <div class="row-fields">
+          <div class="field"><label for="ikeaWidth">Szélesség (cm)</label><input id="ikeaWidth" name="width" type="number" min="0.1" max="5000" step="0.1" required></div>
+          <div class="field"><label for="ikeaDepth">Mélység (cm)</label><input id="ikeaDepth" name="depth" type="number" min="0.1" max="5000" step="0.1" required></div>
+        </div>
+        <div class="row-fields">
+          <div class="field"><label for="ikeaHeight">Magasság (cm, opcionális)</label><input id="ikeaHeight" name="height" type="number" min="0.1" max="5000" step="0.1"></div>
+          <div class="field"><label for="ikeaCategory">Kategória</label><select id="ikeaCategory" name="category"></select></div>
+        </div>
+        <label class="favorite-check"><input id="ikeaSaveFavorite" type="checkbox" checked> Mentés a kedvencek közé</label>
+      </div>
+      <div class="dialog-actions">
+        <button value="cancel">Mégse</button>
+        <button value="import" id="ikeaImportOk" class="primary" disabled>Hozzáadás a tervhez</button>
+      </div>
+    </form>
+  </dialog>
+
+  <script src="core.js"></script>
+  <script src="ikea-catalog.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

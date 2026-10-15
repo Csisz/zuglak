@@ -1,60 +1,1177 @@
-/* Zuglak: offline, local-first 2D furniture editor, zero external dependencies. */
-(()=>{'use strict';
-// A sorrend az utolsóként feltöltött három rajz sorrendjét követi.
-// A referencia-pontok az EREDETI képek ismert méretű szakaszai.
-// Fontos: egyes rajzi részletek nem arányosak; a skála csak a referencia közelében pontos.
-const PLAN=[
-{id:'room1',name:'1. szoba – lépcsőzetes alaprajz',url:'assets/alaprajz-1.png',pxPerCm:884/440,reference:{x1:83,y1:1141,x2:967,y2:1141,cm:440,label:'Alsó fal · 440 cm'}},
-{id:'room2',name:'2. szoba – tagolt alaprajz',url:'assets/alaprajz-2.png',pxPerCm:219/102,reference:{x1:119,y1:232,x2:338,y2:232,cm:102,label:'Bal felső szakasz · 102 cm'}},
-{id:'room3',name:'3. szoba – keskeny alaprajz',url:'assets/alaprajz-3.png',pxPerCm:126/20,reference:{x1:226,y1:90,x2:352,y2:90,cm:20,label:'Bal felső szakasz · 20 cm'}}
-];
-const CATALOG=[['sofa','Kanapé',220,95],['armchair','Fotel',82,86],['bed','Ágy',180,200],['table','Étkezőasztal',160,90],['chair','Szék',46,50],['wardrobe','Szekrény',180,60],['dresser','Komód',120,45],['rug','Szőnyeg',200,140],['desk','Íróasztal',120,60],['coffee','Dohányzóasztal',110,60],['plant','Növény',42,42],['shelf','Polc',100,34],['tv','TV',120,15],['stool','Hokedli',38,38],['bath','Fürdőkád',170,75],['sink','Mosdó',55,45]];
-const $=id=>document.getElementById(id), canvas=$('stage'),wrap=$('stageWrap');let ctx=canvas.getContext('2d');
-const empty=()=>({items:[]}); const defaults=()=>({version:1,currentRoom:'room1',rooms:Object.fromEntries(PLAN.map(p=>[p.id,{name:p.name,pxPerCm:p.pxPerCm,active:'Alap',variants:{Alap:empty()}}]))});
-let data=defaults();try{const p=JSON.parse(localStorage.getItem('zuglak-v2')||'null');if(p&&p.version===1&&p.rooms&&PLAN.every(x=>p.rooms[x.id]))data=p;}catch{};
-let image=null,roomId=data.currentRoom,selected=null,mode='select',view={x:0,y:0,z:1},drag=null,lineStart=null,lineEnd=null,spaceDown=false,pointer={},statusTimeout=null;
-const room=()=>data.rooms[roomId],items=()=>room().variants[room().active].items,plan=()=>PLAN.find(p=>p.id===roomId),scale=()=>room().pxPerCm;
-let history=[],future=[],lastSnapshot=JSON.stringify(data),snapEnabled=false;function updateHistoryButtons(){ $('undo').disabled=!history.length;$('redo').disabled=!future.length;}function restoreSnapshot(snapshot){data=JSON.parse(snapshot);roomId=data.currentRoom&&data.rooms[data.currentRoom]?data.currentRoom:'room1';selected=null;lastSnapshot=snapshot;localStorage.setItem('zuglak-v2',snapshot);openRoom(roomId);updateHistoryButtons();}function undo(){if(!history.length)return;future.push(JSON.stringify(data));restoreSnapshot(history.pop());flash('Visszavonva');}function redo(){if(!future.length)return;history.push(JSON.stringify(data));restoreSnapshot(future.pop());flash('Újra végrehajtva');}const save=()=>{const snapshot=JSON.stringify(data);if(snapshot!==lastSnapshot){history.push(lastSnapshot);if(history.length>60)history.shift();future=[];lastSnapshot=snapshot;updateHistoryButtons();}try{localStorage.setItem('zuglak-v2',JSON.stringify(data));$('saveState').textContent='✓ Automatikusan mentve';}catch{$('saveState').textContent='⚠ Mentés sikertelen';}};
-function flash(t,ms=5000){$('status').textContent=t;clearTimeout(statusTimeout);if(ms)statusTimeout=setTimeout(()=>{$('status').textContent='A terv szerkeszthető. Kattints egy bútorra a hozzáadáshoz.';},ms);}
-function localPoint(ev){const rect=canvas.getBoundingClientRect();return {x:ev.clientX-rect.left,y:ev.clientY-rect.top};}function screen(p){return{x:p.x*view.z+view.x,y:p.y*view.z+view.y}}function world(p){return{x:(p.x-view.x)/view.z,y:(p.y-view.y)/view.z}};
-const clamp=(v,a,b)=>Math.max(a,Math.min(b,v)),rad=d=>d*Math.PI/180;
-function furnitureSize(it){const s=scale()||2;return {w:Math.max(1,it.w*s),h:Math.max(1,it.h*s)};}
-function rounded(x,y,w,h,r,fill,stroke='#647568'){ctx.beginPath();ctx.roundRect(x,y,Math.max(1,w),Math.max(1,h),Math.max(0,Math.min(r,w/2,h/2)));ctx.fillStyle=fill;ctx.fill();if(stroke){ctx.strokeStyle=stroke;ctx.lineWidth=Math.max(.7,1/view.z);ctx.stroke();}}
-function art(type,w,h){const pad=Math.min(w,h)*.10;ctx.save();rounded(0,0,w,h,Math.min(w,h)*.08,{rug:'#dbc5aa',sofa:'#c4cabc',armchair:'#c5c3ae',bed:'#bfcad3',table:'#bb9876',chair:'#c7aa88',wardrobe:'#c8b9a4',dresser:'#d3b89b',desk:'#ae9375',coffee:'#b99571',plant:'#e2d8c0',shelf:'#bdac96',tv:'#414f50',stool:'#ccbb9a',bath:'#e0e9e9',sink:'#dfe6e4'}[type]||'#d8d1c4');const rect=(x,y,a,b,c,s)=>rounded(x,y,Math.max(1,a),Math.max(1,b),Math.min(c,a/2,b/2),s);
-if(type==='sofa'||type==='armchair'){rect(pad,pad,w-2*pad,h-2*pad,Math.min(w,h)*.1,'#e0e3d8');rect(0,0,w,pad*1.5,2,'#a8b3a1');rect(0,0,pad*.85,h,2,'#a8b3a1');rect(w-pad*.85,0,pad*.85,h,2,'#a8b3a1');const n=type==='sofa'?3:1;for(let i=1;i<n;i++){ctx.beginPath();ctx.moveTo(w*i/n,pad*1.6);ctx.lineTo(w*i/n,h-pad);ctx.strokeStyle='#aeb9aa';ctx.stroke()}};
-if(type==='bed'){rect(pad,pad,w-2*pad,h-2*pad,4,'#f1eee7');rect(pad,pad,w/2-pad*1.2,h*.2,5,'#f9faf6');rect(w/2+pad*.2,pad,w/2-pad*1.2,h*.2,5,'#f9faf6');rect(pad,h*.33,w-2*pad,h*.53,4,'#cad5d3');ctx.strokeStyle='#e6eeea';ctx.lineWidth=3;ctx.beginPath();ctx.moveTo(pad,h*.53);ctx.lineTo(w-pad,h*.53);ctx.stroke()}
-if(['table','desk','coffee'].includes(type)){rect(pad*.5,pad*.5,w-pad,h-pad,Math.min(w,h)*.08,'#d0b08c');ctx.strokeStyle='#b49069';ctx.lineWidth=2;for(let i=1;i<4;i++){ctx.beginPath();ctx.moveTo(w*i/4,pad);ctx.lineTo(w*i/4,h-pad);ctx.stroke()}}
-if(['chair','stool'].includes(type)){rect(pad,pad,w-2*pad,h-2*pad,5,'#e6d2b5');if(type==='chair')rect(pad,pad,w-2*pad,Math.max(3,h*.16),2,'#a8886a')}
-if(type==='wardrobe'){ctx.strokeStyle='#958a7d';ctx.lineWidth=2;ctx.beginPath();ctx.moveTo(w/2,0);ctx.lineTo(w/2,h);ctx.stroke();rect(w/2-12,h*.45,3,h*.12,2,'#746f65');rect(w/2+9,h*.45,3,h*.12,2,'#746f65')}
-if(type==='dresser'||type==='shelf'){ctx.strokeStyle='#a58d77';ctx.lineWidth=2;for(let i=1;i<4;i++){ctx.beginPath();ctx.moveTo(pad,i*h/4);ctx.lineTo(w-pad,i*h/4);ctx.stroke()}}
-if(type==='rug'){ctx.setLineDash([5,5]);ctx.strokeStyle='#b99f85';ctx.lineWidth=2;ctx.strokeRect(pad,pad,w-2*pad,h-2*pad);ctx.setLineDash([])}
-if(type==='plant'){const r=Math.min(w,h)*.33;ctx.fillStyle='#648b64';for(let i=0;i<7;i++){const a=i*Math.PI*2/7;ctx.beginPath();ctx.ellipse(w/2+Math.cos(a)*r*.43,h/2+Math.sin(a)*r*.43,r*.6,r*.35,a,0,Math.PI*2);ctx.fill()}ctx.fillStyle='#91ae6f';ctx.beginPath();ctx.arc(w/2,h/2,r*.3,0,Math.PI*2);ctx.fill()}
-if(type==='tv'){rect(pad,pad,w-pad*2,h-pad*2,1,'#1f292c')}
-if(type==='bath'||type==='sink'){rect(pad,pad,w-2*pad,h-2*pad,Math.min(w,h)*.25,'#f9fdfd');ctx.beginPath();ctx.arc(w*.8,h*.5,Math.min(w,h)*.04,0,Math.PI*2);ctx.fillStyle='#b3c1c4';ctx.fill()}
-ctx.restore()}
-function drawItem(it){const p=furnitureSize(it);ctx.save();ctx.translate(it.x,it.y);ctx.rotate(rad(it.rot));art(it.type,p.w,p.h);if(it.id===selected){ctx.save();ctx.strokeStyle='#1c795c';ctx.setLineDash([7/view.z,4/view.z]);ctx.lineWidth=2/view.z;ctx.strokeRect(-3/view.z,-3/view.z,p.w+6/view.z,p.h+6/view.z);ctx.restore()}ctx.restore()}
-function draw(){const w=wrap.clientWidth,h=wrap.clientHeight,dpr=devicePixelRatio||1;const aw=Math.round(w*dpr),ah=Math.round(h*dpr);if(canvas.width!==aw||canvas.height!==ah){canvas.width=aw;canvas.height=ah;canvas.style.width=w+'px';canvas.style.height=h+'px';}ctx.setTransform(dpr,0,0,dpr,0,0);ctx.clearRect(0,0,w,h);ctx.save();ctx.translate(view.x,view.y);ctx.scale(view.z,view.z);if(image){ctx.drawImage(image,0,0);ctx.strokeStyle='#cad8c8';ctx.lineWidth=1/view.z;ctx.strokeRect(0,0,image.width,image.height)}if($('showReference')?.checked&&plan().reference){const r=plan().reference;ctx.save();ctx.strokeStyle='#cf443c';ctx.lineWidth=3/view.z;ctx.setLineDash([8/view.z,5/view.z]);ctx.beginPath();ctx.moveTo(r.x1,r.y1);ctx.lineTo(r.x2,r.y2);ctx.stroke();ctx.setLineDash([]);ctx.fillStyle='#9b302a';ctx.font=`${15/view.z}px sans-serif`;ctx.fillText(r.label,r.x1,r.y1-12/view.z);ctx.restore()}for(const it of items())drawItem(it);if(lineStart&&lineEnd){ctx.strokeStyle=mode==='calibrate'?'#e25f48':'#32816c';ctx.lineWidth=3/view.z;ctx.setLineDash([10/view.z,5/view.z]);ctx.beginPath();ctx.moveTo(lineStart.x,lineStart.y);ctx.lineTo(lineEnd.x,lineEnd.y);ctx.stroke();ctx.setLineDash([])}ctx.restore();$('zoomLabel').textContent=Math.round(view.z*100)+'%';$('scaleInfo').textContent=scale()?`Becsült skála: 1 cm = ${scale().toFixed(2)} px · Az eredeti rajz nem mindenütt arányos!`:'⚠ Méretarány kalibrálása szükséges a pontos bútorokhoz';}
-function fit(){if(!image)return;const w=wrap.clientWidth,h=wrap.clientHeight;view.z=Math.min((w-60)/image.width,(h-60)/image.height);view.x=(w-image.width*view.z)/2;view.y=(h-image.height*view.z)/2;draw()}
-function zoom(f,at={x:wrap.clientWidth/2,y:wrap.clientHeight/2}){const o=world(at);view.z=clamp(view.z*f,.15,7);view.x=at.x-o.x*view.z;view.y=at.y-o.y*view.z;draw()}
-function hit(p){for(const it of [...items()].reverse()){const sz=furnitureSize(it),dx=p.x-it.x,dy=p.y-it.y,a=-rad(it.rot);const x=dx*Math.cos(a)-dy*Math.sin(a),y=dx*Math.sin(a)+dy*Math.cos(a);if(x>=0&&y>=0&&x<=sz.w&&y<=sz.h)return it;}return null}
-function setMode(m){mode=m;lineStart=lineEnd=null;['select','calibrate','measure','pan'].forEach(t=>$('mode'+t[0].toUpperCase()+t.slice(1)).classList.toggle('selected',m===t));$('hintMode').textContent={select:'Húzd a bútorokat a helyükre.',calibrate:'Kattints egy ismert hosszúság két végpontjára.',measure:'Kattints két pontra a távolság méréséhez.',pan:'Húzd az alaprajzot a nézet mozgatásához.'}[m];canvas.style.cursor=m==='pan'?'grab':m==='calibrate'||m==='measure'?'crosshair':'default';draw()}
-function renderRooms(){ $('rooms').innerHTML='';for(const p of PLAN){const r=data.rooms[p.id],b=document.createElement('button');b.className='room'+(roomId===p.id?' active':'');b.innerHTML=`<img src="${p.url}" alt=""><span></span>`;b.querySelector('span').textContent=r.name;b.onclick=()=>openRoom(p.id);$('rooms').append(b)}}
-function renderCatalog(){const el=$('catalog');el.innerHTML='';CATALOG.filter(([type,name])=>(name+' '+type).toLocaleLowerCase('hu').includes(($('catalogSearch').value||'').toLocaleLowerCase('hu'))).forEach(([type,name,w,h])=>{const b=document.createElement('button');const svg=`<svg viewBox="0 0 70 58"><rect x="5" y="7" width="60" height="44" rx="7" fill="#d4d0bc" stroke="#9ea99c"/><rect x="11" y="13" width="48" height="31" rx="4" fill="#e9e7db"/><path d="M35 13v31" stroke="#b6bcad"/></svg>`;b.innerHTML=svg+`<strong></strong><small>${w} × ${h}</small>`;b.querySelector('strong').textContent=name;b.onclick=()=>addItem(type,name,w,h);el.append(b)})}
-function addItem(type,name,w,h){const c=world({x:wrap.clientWidth/2,y:wrap.clientHeight/2}),s=scale()||2;const it={id:crypto.randomUUID?crypto.randomUUID():'i'+Date.now()+Math.random(),type,name,w,h,rot:0,x:c.x-w*s/2,y:c.y-h*s/2};items().push(it);selected=it.id;save();renderProps();draw();flash('Hozzáadva: '+name)}
-function renderVariants(){const el=$('variant');el.innerHTML='';Object.keys(room().variants).forEach(v=>{const op=document.createElement('option');op.value=v;op.textContent=v;el.append(op)});el.value=room().active}
-function renderProps(){const el=$('props'),it=items().find(x=>x.id===selected);el.innerHTML='';if(!it){el.innerHTML='<p class="hint">Válassz egy bútort a terven, vagy adj hozzá egyet a bal oldali katalógusból.</p>';return}const addField=(label,key,type='number',step='1')=>{const div=document.createElement('div');div.className='field';const lab=document.createElement('label');lab.textContent=label;const input=document.createElement('input');input.type=type;input.value=it[key];if(type==='number'){input.min=key==='rot'?'-360':'1';input.step=step;}input.addEventListener('change',()=>{const value=type==='number'?Number(input.value):input.value;if(type==='number'&&!Number.isFinite(value))return;if((key==='w'||key==='h')&&value<=0){input.value=it[key];return}it[key]=value;save();draw();});div.append(lab,input);el.append(div)};addField('Megnevezés','name','text');addField('Szélesség (cm)','w');addField('Mélység (cm)','h');addField('Forgatás (°)','rot');const buttons=document.createElement('div');buttons.className='small-actions';const rotate=document.createElement('button');rotate.textContent='↻ 90°';rotate.onclick=()=>{it.rot=(it.rot+90)%360;save();renderProps();draw()};const duplicate=document.createElement('button');duplicate.textContent='⧉ Másolat';duplicate.onclick=()=>{const c=structuredClone(it);c.id='i'+Date.now()+Math.random();c.x+=28;c.y+=28;items().push(c);selected=c.id;save();renderProps();draw()};const del=document.createElement('button');del.textContent='Törlés';del.className='danger';del.onclick=()=>{room().variants[room().active].items=items().filter(i=>i.id!==it.id);selected=null;save();renderProps();draw()};buttons.append(rotate,duplicate,del);el.append(buttons)}
-function openRoom(id){roomId=id;data.currentRoom=id;selected=null;lineStart=lineEnd=null;image=new Image();image.onload=()=>{fit();renderRooms();renderVariants();renderProps();save();flash('Megnyitva: '+room().name+' · Ellenőrizd a piros referencia-szakaszt és a méreteket!',6500)};image.onerror=()=>flash('Nem sikerült betölteni az alaprajzot.');image.src=plan().url;renderRooms()}
-function ask(title,hint,fields){return new Promise(resolve=>{const dialog=$('dialog'),f=$('dialogFields');$('dialogTitle').textContent=title;$('dialogHint').textContent=hint;f.innerHTML='';for(const x of fields){const box=document.createElement('div');box.className='field';const l=document.createElement('label');l.textContent=x.label;const inp=document.createElement('input');inp.name=x.key;inp.value=x.value??'';inp.type=x.type||'text';if(inp.type==='number'){inp.min=x.min??'0.01';inp.step='any'}inp.required=true;box.append(l,inp);f.append(box)}dialog.showModal();const close=e=>{dialog.removeEventListener('close',close);if(dialog.returnValue!=='ok'){resolve(null);return}const out={};for(const x of fields)out[x.key]=f.querySelector(`[name="${x.key}"]`).value;resolve(out)};dialog.addEventListener('close',close,{once:true})})}
-canvas.addEventListener('pointerdown',e=>{e.preventDefault();canvas.setPointerCapture(e.pointerId);const p=localPoint(e),w=world(p);pointer={x:p.x,y:p.y};if(mode==='pan'||spaceDown||e.button===1){drag={type:'pan',start:p,view:{...view}};return}if(mode==='calibrate'||mode==='measure'){if(!lineStart){lineStart=w;lineEnd=w;flash('Válaszd ki a második pontot.',0)}else{lineEnd=w;const length=Math.hypot(w.x-lineStart.x,w.y-lineStart.y);if(length<3){flash('A kijelölt szakasz túl rövid.');lineStart=lineEnd=null;draw();return}if(mode==='calibrate'){ask('Méretarány beállítása','Add meg a kijelölt szakasz valós hosszát centiméterben.',[{key:'cm',label:'Valós hossz (cm)',value:'100',type:'number'}]).then(v=>{if(v&&Number(v.cm)>0){const old=scale()||2,ns=length/Number(v.cm);room().pxPerCm=ns;save();flash('Méretarány beállítva: 1 cm = '+ns.toFixed(2)+' px');setMode('select')}lineStart=lineEnd=null;draw()})}else{if(scale()){flash('Mért távolság: '+(length/scale()).toFixed(1)+' cm',8000)}else flash('Előbb kalibráld az alaprajz méretarányát.');lineStart=lineEnd=null;} }draw();return}const it=hit(w);selected=it?.id||null;if(it){drag={type:'furniture',id:it.id,from:w,x:it.x,y:it.y}}renderProps();draw()});
-canvas.addEventListener('pointermove',e=>{const p=localPoint(e),w=world(p);if(drag?.type==='pan'){view.x=drag.view.x+p.x-drag.start.x;view.y=drag.view.y+p.y-drag.start.y;draw()}else if(drag?.type==='furniture'){const it=items().find(i=>i.id===drag.id);if(it){it.x=drag.x+w.x-drag.from.x;it.y=drag.y+w.y-drag.from.y;draw()}}else if(lineStart&&!drag){lineEnd=w;draw()}});
-const endDrag=()=>{if(drag?.type==='furniture'){const it=items().find(i=>i.id===drag.id);if(it&&snapEnabled){const unit=(scale()||2)*5;it.x=Math.round(it.x/unit)*unit;it.y=Math.round(it.y/unit)*unit;}save();renderProps();draw();}drag=null};canvas.addEventListener('pointerup',endDrag);canvas.addEventListener('pointercancel',endDrag);canvas.addEventListener('wheel',e=>{e.preventDefault();zoom(Math.exp(-e.deltaY*.0014),localPoint(e))},{passive:false});window.addEventListener('keydown',e=>{const typing=['INPUT','TEXTAREA','SELECT'].includes(document.activeElement?.tagName);if(!typing&&(e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==='z'){e.preventDefault();e.shiftKey?redo():undo();return;}if(!typing&&(e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==='y'){e.preventDefault();redo();return;}if(!typing&&(e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==='d'&&selected){e.preventDefault();const it=items().find(i=>i.id===selected);if(it){const copy=structuredClone(it);copy.id='i'+Date.now()+Math.random();copy.x+=25;copy.y+=25;items().push(copy);selected=copy.id;save();renderProps();draw();}return;}if(!typing&&selected&&['ArrowLeft','ArrowRight','ArrowUp','ArrowDown'].includes(e.key)){e.preventDefault();const it=items().find(i=>i.id===selected);if(it){const step=(e.shiftKey?10:1)*(scale()||2);if(e.key==='ArrowLeft')it.x-=step;if(e.key==='ArrowRight')it.x+=step;if(e.key==='ArrowUp')it.y-=step;if(e.key==='ArrowDown')it.y+=step;save();draw();}return;}if(e.code==='Space'&&!['INPUT','TEXTAREA'].includes(document.activeElement.tagName)){e.preventDefault();spaceDown=true}if(e.key==='Escape'){selected=null;lineStart=lineEnd=null;renderProps();draw()}if((e.key==='Delete'||e.key==='Backspace')&&selected&&!['INPUT','TEXTAREA'].includes(document.activeElement.tagName)){room().variants[room().active].items=items().filter(i=>i.id!==selected);selected=null;save();renderProps();draw()}});window.addEventListener('keyup',e=>{if(e.code==='Space')spaceDown=false});window.addEventListener('resize',draw);
-for(const m of ['select','calibrate','measure','pan'])$('mode'+m[0].toUpperCase()+m.slice(1)).onclick=()=>setMode(m);$('zoomOut').onclick=()=>zoom(1/1.25);$('zoomIn').onclick=()=>zoom(1.25);$('fit').onclick=fit;
-$('variant').onchange=e=>{room().active=e.target.value;selected=null;save();renderProps();draw()};$('newVariant').onclick=async()=>{const a=await ask('Új berendezési változat','A jelenlegi változat bútorait lemásoljuk.',[{key:'name',label:'Változat neve',value:'Új változat'}]);const name=a?.name?.trim();if(!name)return;if(room().variants[name])return flash('Már létezik ilyen nevű változat.');room().variants[name]={items:structuredClone(items())};room().active=name;selected=null;save();renderVariants();renderProps();draw()};$('deleteVariant').onclick=()=>{if(Object.keys(room().variants).length<2)return flash('Az utolsó változat nem törölhető.');if(!confirm('Biztosan törlöd ezt a változatot?'))return;delete room().variants[room().active];room().active=Object.keys(room().variants)[0];selected=null;save();renderVariants();renderProps();draw()};
-$('renameRoom').onclick=async()=>{const a=await ask('Helyiség átnevezése','Adj beszédes nevet az alaprajznak.',[{key:'name',label:'Helyiség neve',value:room().name}]);if(a?.name?.trim()){room().name=a.name.trim();save();renderRooms()}};
-$('resetRoom').onclick=()=>{if(!confirm('Töröljük az aktuális változat összes bútorát?'))return;room().variants[room().active].items=[];selected=null;save();renderProps();draw()};
-$('customFurniture').onclick=async()=>{const v=await ask('Egyedi méretű bútor','Add meg a bútor pontos méretét centiméterben.',[{key:'name',label:'Megnevezés',value:'Saját bútor'},{key:'w',label:'Szélesség (cm)',value:'120',type:'number'},{key:'h',label:'Mélység (cm)',value:'60',type:'number'}]);if(v&&Number(v.w)>0&&Number(v.h)>0)addItem('custom',v.name,Number(v.w),Number(v.h))};
-$('exportJSON').onclick=()=>download('zuglak-tervek.json',new Blob([JSON.stringify(data,null,2)],{type:'application/json'}));function download(name,blob){const url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download=name;a.click();setTimeout(()=>URL.revokeObjectURL(url),1000)}
-$('importJSON').onchange=async e=>{const f=e.target.files?.[0];if(!f)return;try{const d=JSON.parse(await f.text());if(d.version!==1||!d.rooms||!PLAN.every(p=>d.rooms[p.id]?.variants))throw Error('Hibás fájl');if(!confirm('Betöltjük a fájlt? Ez felülírja a böngésző jelenlegi terveit.'))return;data=d;roomId=data.currentRoom&&data.rooms[data.currentRoom]?data.currentRoom:'room1';selected=null;save();openRoom(roomId);flash('Sikeres tervbetöltés.')}catch(err){flash('A JSON nem Zuglak tervfájl.')}e.target.value=''};
-$('exportPNG').onclick=()=>{if(!image)return;const out=document.createElement('canvas');out.width=image.width;out.height=image.height;const previousCtx=ctx,previousSelected=selected;try{ctx=out.getContext('2d');ctx.drawImage(image,0,0);selected=null;items().forEach(drawItem)}finally{ctx=previousCtx;selected=previousSelected}out.toBlob(b=>{if(b)download(`zuglak-${room().name.replace(/\W/g,'_')}-${room().active}.png`,b)},'image/png')};
-$('undo').onclick=undo;$('redo').onclick=redo;$('snap').onclick=()=>{snapEnabled=!snapEnabled;$('snap').classList.toggle('selected',snapEnabled);$('snap').setAttribute('aria-pressed',String(snapEnabled));$('snap').textContent='⊞ 5 cm rács: '+(snapEnabled?'be':'ki');};$('catalogSearch').addEventListener('input',renderCatalog);$('showReference').onchange=draw;updateHistoryButtons();renderCatalog();openRoom(roomId);setMode('select');
+/* Zuglak Studio 1.4: offline, local-first 2D furniture editor. */
+(() => {
+  'use strict';
+
+  const Core = window.ZuglakCore;
+  const Ikea = window.ZUGLAK_IKEA_CATALOG;
+  if (!Core || !Ikea) throw new Error('A Zuglak adatmoduljai nem töltődtek be.');
+
+  // The reference points belong to known-length segments in the original images.
+  const ORIGINAL_PLANS = [
+    { id: 'room1', name: '1. szoba – lépcsőzetes alaprajz', url: 'assets/alaprajz-1.png', pxPerCm: 884 / 440, reference: { x1: 83, y1: 1141, x2: 967, y2: 1141, cm: 440, label: 'Alsó fal · 440 cm' } },
+    { id: 'room2', name: '2. szoba – tagolt alaprajz', url: 'assets/alaprajz-2.png', pxPerCm: 219 / 102, reference: { x1: 119, y1: 232, x2: 338, y2: 232, cm: 102, label: 'Bal felső szakasz · 102 cm' } },
+    { id: 'room3', name: '3. szoba – keskeny alaprajz', url: 'assets/alaprajz-3.png', pxPerCm: 126 / 20, reference: { x1: 226, y1: 90, x2: 352, y2: 90, cm: 20, label: 'Bal felső szakasz · 20 cm' } }
+  ];
+
+  const BASIC_CATALOG = [
+    ['sofa', 'Kanapé', 220, 95], ['armchair', 'Fotel', 82, 86], ['bed', 'Ágy', 180, 200],
+    ['table', 'Étkezőasztal', 160, 90], ['chair', 'Szék', 46, 50], ['wardrobe', 'Szekrény', 180, 60],
+    ['dresser', 'Komód', 120, 45], ['rug', 'Szőnyeg', 200, 140], ['desk', 'Íróasztal', 120, 60],
+    ['coffee', 'Dohányzóasztal', 110, 60], ['plant', 'Növény', 42, 42], ['shelf', 'Polc', 100, 34],
+    ['tv', 'TV', 120, 15], ['stool', 'Hokedli', 38, 38], ['bath', 'Fürdőkád', 170, 75], ['sink', 'Mosdó', 55, 45]
+  ].map(([type, name, width, depth]) => ({ type, name, width, depth, category: 'basic' }));
+
+  const $ = id => document.getElementById(id);
+  const canvas = $('stage');
+  const wrap = $('stageWrap');
+  let ctx = canvas.getContext('2d');
+  const emptyVariant = () => ({ items: [] });
+  const defaults = () => ({
+    version: 1,
+    currentRoom: 'room1',
+    customPlans: [],
+    rooms: Object.fromEntries(ORIGINAL_PLANS.map(plan => [plan.id, {
+      name: plan.name,
+      pxPerCm: plan.pxPerCm,
+      active: 'Alap',
+      variants: { Alap: emptyVariant() }
+    }]))
+  });
+
+  let data = Core.loadPlan(localStorage, defaults, ORIGINAL_PLANS.map(plan => plan.id));
+  data.customPlans = Array.isArray(data.customPlans) ? data.customPlans : [];
+  let favorites = Core.loadFavorites(localStorage);
+  let image = null;
+  let roomId = data.currentRoom && data.rooms[data.currentRoom] ? data.currentRoom : 'room1';
+  let selected = null;
+  let mode = 'select';
+  let view = { x: 0, y: 0, z: 1 };
+  let drag = null;
+  let lineStart = null;
+  let lineEnd = null;
+  let spaceDown = false;
+  let statusTimeout = null;
+  let history = [];
+  let future = [];
+  let lastSnapshot = JSON.stringify(data);
+  let snapEnabled = false;
+  let catalogTab = 'ikea';
+  let resolvedImport = null;
+
+  const allPlans = () => [...ORIGINAL_PLANS, ...data.customPlans];
+  const room = () => data.rooms[roomId];
+  const items = () => room().variants[room().active].items;
+  const plan = () => allPlans().find(value => value.id === roomId) || ORIGINAL_PLANS[0];
+  const scale = () => room().pxPerCm;
+  const idFactory = () => crypto.randomUUID ? crypto.randomUUID() : `i${Date.now()}${Math.random()}`;
+  const clamp = (value, min, max) => Math.max(min, Math.min(max, value));
+  const rad = degrees => degrees * Math.PI / 180;
+  const productTypeForCategory = category => ({
+    sofas: 'sofa', wardrobes: 'wardrobe', beds: 'bed', tables: 'table', chairs: 'chair', storage: 'shelf'
+  })[category] || 'custom';
+
+  function updateHistoryButtons() {
+    $('undo').disabled = !history.length;
+    $('redo').disabled = !future.length;
+  }
+
+  function restoreSnapshot(snapshot) {
+    data = JSON.parse(snapshot);
+    data.customPlans = Array.isArray(data.customPlans) ? data.customPlans : [];
+    roomId = data.currentRoom && data.rooms[data.currentRoom] ? data.currentRoom : 'room1';
+    selected = null;
+    lastSnapshot = snapshot;
+    localStorage.setItem(Core.PLAN_STORAGE_KEY, snapshot);
+    openRoom(roomId, false);
+    updateHistoryButtons();
+  }
+
+  function undo() {
+    if (!history.length) return;
+    future.push(JSON.stringify(data));
+    restoreSnapshot(history.pop());
+    flash('Visszavonva');
+  }
+
+  function redo() {
+    if (!future.length) return;
+    history.push(JSON.stringify(data));
+    restoreSnapshot(future.pop());
+    flash('Újra végrehajtva');
+  }
+
+  function save(trackHistory = true) {
+    const snapshot = JSON.stringify(data);
+    if (trackHistory && snapshot !== lastSnapshot) {
+      history.push(lastSnapshot);
+      if (history.length > 60) history.shift();
+      future = [];
+      updateHistoryButtons();
+    }
+    try {
+      localStorage.setItem(Core.PLAN_STORAGE_KEY, snapshot);
+      lastSnapshot = snapshot;
+      $('saveState').textContent = '✓ Automatikusan mentve';
+      return true;
+    } catch {
+      $('saveState').textContent = '⚠ A helyi tárhely megtelt';
+      flash('A mentés nem sikerült. A feltöltött alaprajz túl nagy lehet; mentsd le a tervet JSON-fájlba.', 9000);
+      return false;
+    }
+  }
+
+  function flash(text, duration = 5000) {
+    $('status').textContent = text;
+    clearTimeout(statusTimeout);
+    if (duration) {
+      statusTimeout = setTimeout(() => {
+        $('status').textContent = 'A terv szerkeszthető. Kattints egy bútorra a hozzáadáshoz.';
+      }, duration);
+    }
+  }
+
+  function localPoint(event) {
+    const rect = canvas.getBoundingClientRect();
+    return { x: event.clientX - rect.left, y: event.clientY - rect.top };
+  }
+
+  const world = point => ({ x: (point.x - view.x) / view.z, y: (point.y - view.y) / view.z });
+
+  function furnitureSize(item) {
+    const value = scale() || 2;
+    return { w: Math.max(1, item.w * value), h: Math.max(1, item.h * value) };
+  }
+
+  function rounded(x, y, width, height, radius, fill, stroke = '#647568') {
+    const w = Math.max(1, width);
+    const h = Math.max(1, height);
+    const r = Math.max(0, Math.min(radius, w / 2, h / 2));
+    ctx.beginPath();
+    if (ctx.roundRect) ctx.roundRect(x, y, w, h, r);
+    else ctx.rect(x, y, w, h);
+    ctx.fillStyle = fill;
+    ctx.fill();
+    if (stroke) {
+      ctx.strokeStyle = stroke;
+      ctx.lineWidth = Math.max(0.7, 1 / view.z);
+      ctx.stroke();
+    }
+  }
+
+  function drawLine(x1, y1, x2, y2, color, width = 1) {
+    ctx.beginPath();
+    ctx.moveTo(x1, y1);
+    ctx.lineTo(x2, y2);
+    ctx.strokeStyle = color;
+    ctx.lineWidth = Math.max(width, 0.7 / view.z);
+    ctx.stroke();
+  }
+
+  // Purpose-built vector floor-plan illustrations; no product photography is copied.
+  function art(type, width, height, isIkea = false) {
+    const min = Math.min(width, height);
+    const pad = Math.max(2 / view.z, min * 0.09);
+    const palette = isIkea
+      ? { base: '#d9ddcf', light: '#f1f1e9', edge: '#65786a', accent: '#9bab99', wood: '#c8a77d' }
+      : { base: '#d8d1c4', light: '#eeeae1', edge: '#7d7a70', accent: '#b5ad9f', wood: '#c9a57f' };
+    const rect = (x, y, w, h, r, color, stroke = palette.edge) => rounded(x, y, w, h, r, color, stroke);
+
+    ctx.save();
+    rect(0, 0, width, height, min * 0.07, palette.base);
+
+    if (type === 'sofa' || type === 'armchair') {
+      rect(pad * 0.85, pad * 1.25, width - pad * 1.7, height - pad * 2, min * 0.08, palette.light);
+      rect(0, 0, width, pad * 1.55, min * 0.04, palette.accent);
+      rect(0, 0, pad * 1.05, height, min * 0.04, palette.accent);
+      rect(width - pad * 1.05, 0, pad * 1.05, height, min * 0.04, palette.accent);
+      const cushions = type === 'sofa' ? (width > height * 2.2 ? 3 : 2) : 1;
+      for (let index = 1; index < cushions; index++) {
+        drawLine(width * index / cushions, pad * 1.7, width * index / cushions, height - pad, '#b4bdae');
+      }
+      drawLine(pad * 1.3, height - pad * 1.2, width - pad * 1.3, height - pad * 1.2, '#c2c9bc');
+    } else if (type === 'bed') {
+      rect(pad, pad * 0.75, width - 2 * pad, height - pad * 1.5, min * 0.04, '#f4f2eb');
+      rect(0, 0, width, pad * 1.2, min * 0.025, palette.accent);
+      rect(pad * 1.2, pad * 1.5, width / 2 - pad * 1.45, height * 0.18, min * 0.04, '#fff');
+      rect(width / 2 + pad * 0.25, pad * 1.5, width / 2 - pad * 1.45, height * 0.18, min * 0.04, '#fff');
+      rect(pad * 1.05, height * 0.35, width - pad * 2.1, height * 0.52, min * 0.04, '#c9d5d1');
+      drawLine(pad * 1.2, height * 0.56, width - pad * 1.2, height * 0.56, '#e8efeb', 2 / view.z);
+      drawLine(pad * 1.2, height * 0.7, width - pad * 1.2, height * 0.7, '#b8c9c2');
+    } else if (['table', 'desk', 'coffee'].includes(type)) {
+      rect(pad * 0.45, pad * 0.45, width - pad * 0.9, height - pad * 0.9, min * 0.07, palette.wood);
+      ctx.globalAlpha = 0.45;
+      for (let index = 1; index < 5; index++) {
+        drawLine(width * index / 5, pad, width * index / 5, height - pad, '#967655');
+      }
+      ctx.globalAlpha = 1;
+      const leg = Math.max(2 / view.z, min * 0.1);
+      [[pad, pad], [width - pad - leg, pad], [pad, height - pad - leg], [width - pad - leg, height - pad - leg]].forEach(([x, y]) => rect(x, y, leg, leg, leg / 2, '#8e7156'));
+    } else if (type === 'chair' || type === 'stool') {
+      rect(pad, pad, width - 2 * pad, height - 2 * pad, min * 0.08, '#e4d1b5');
+      if (type === 'chair') rect(pad * 0.6, pad * 0.55, width - pad * 1.2, Math.max(3 / view.z, height * 0.17), min * 0.03, '#9b7c60');
+      const radius = Math.max(1.5 / view.z, min * 0.045);
+      [[pad, height - pad], [width - pad, height - pad]].forEach(([x, y]) => {
+        ctx.beginPath(); ctx.arc(x, y, radius, 0, Math.PI * 2); ctx.fillStyle = '#80684f'; ctx.fill();
+      });
+    } else if (type === 'wardrobe') {
+      rect(pad * 0.45, pad * 0.45, width - pad * 0.9, height - pad * 0.9, min * 0.035, '#d8cfbf');
+      const doors = width > height * 2 ? 3 : 2;
+      for (let index = 1; index < doors; index++) drawLine(width * index / doors, pad * 0.5, width * index / doors, height - pad * 0.5, '#94897c', 1.3 / view.z);
+      for (let index = 0; index < doors; index++) {
+        const center = width * (index + 0.5) / doors;
+        rect(center - min * 0.015, height * 0.43, min * 0.03, height * 0.15, min * 0.01, '#746f65', null);
+      }
+      drawLine(pad, height - pad * 1.2, width - pad, height - pad * 1.2, '#a69a8b');
+    } else if (type === 'dresser' || type === 'shelf') {
+      rect(pad * 0.5, pad * 0.5, width - pad, height - pad, min * 0.025, '#d1c1ad');
+      const sections = width > height * 2 ? 4 : 3;
+      for (let index = 1; index < sections; index++) drawLine(width * index / sections, pad * 0.55, width * index / sections, height - pad * 0.55, '#9f8d78');
+      drawLine(pad, height / 2, width - pad, height / 2, '#ae9a82');
+    } else if (type === 'rug') {
+      ctx.setLineDash([5 / view.z, 5 / view.z]);
+      ctx.strokeStyle = '#b99f85';
+      ctx.lineWidth = Math.max(1, 2 / view.z);
+      ctx.strokeRect(pad, pad, width - 2 * pad, height - 2 * pad);
+      ctx.setLineDash([]);
+    } else if (type === 'plant') {
+      const radius = min * 0.33;
+      ctx.fillStyle = '#638964';
+      for (let index = 0; index < 8; index++) {
+        const angle = index * Math.PI * 2 / 8;
+        ctx.beginPath();
+        ctx.ellipse(width / 2 + Math.cos(angle) * radius * 0.43, height / 2 + Math.sin(angle) * radius * 0.43, radius * 0.62, radius * 0.28, angle, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      ctx.beginPath(); ctx.arc(width / 2, height / 2, radius * 0.28, 0, Math.PI * 2); ctx.fillStyle = '#96b474'; ctx.fill();
+    } else if (type === 'tv') {
+      rect(pad, pad, width - pad * 2, height - pad * 2, min * 0.02, '#20292c');
+      drawLine(width / 2, height - pad, width / 2, height, '#667273', 2 / view.z);
+    } else if (type === 'bath' || type === 'sink') {
+      rect(pad, pad, width - 2 * pad, height - 2 * pad, min * 0.23, '#fbfefe');
+      ctx.beginPath(); ctx.arc(width * 0.8, height * 0.5, Math.max(1 / view.z, min * 0.045), 0, Math.PI * 2); ctx.fillStyle = '#aebdc0'; ctx.fill();
+    } else {
+      ctx.setLineDash([4 / view.z, 3 / view.z]);
+      ctx.strokeStyle = palette.edge;
+      ctx.strokeRect(pad, pad, width - 2 * pad, height - 2 * pad);
+      ctx.setLineDash([]);
+    }
+
+    if (isIkea && width > 55 / view.z && height > 22 / view.z) {
+      const fontSize = clamp(min * 0.12, 8 / view.z, 13 / view.z);
+      ctx.font = `700 ${fontSize}px system-ui`;
+      ctx.textAlign = 'right';
+      ctx.textBaseline = 'bottom';
+      ctx.fillStyle = '#52675a';
+      ctx.globalAlpha = 0.72;
+      ctx.fillText('IKEA', width - pad, height - pad * 0.65);
+    }
+    ctx.restore();
+  }
+
+  function drawItem(item) {
+    const size = furnitureSize(item);
+    ctx.save();
+    ctx.translate(item.x, item.y);
+    ctx.rotate(rad(item.rot));
+    art(item.type, size.w, size.h, item.source === 'ikea');
+    if (item.id === selected) {
+      ctx.strokeStyle = '#1c795c';
+      ctx.setLineDash([7 / view.z, 4 / view.z]);
+      ctx.lineWidth = 2 / view.z;
+      ctx.strokeRect(-3 / view.z, -3 / view.z, size.w + 6 / view.z, size.h + 6 / view.z);
+      ctx.setLineDash([]);
+    }
+    ctx.restore();
+  }
+
+  function draw() {
+    const width = wrap.clientWidth;
+    const height = wrap.clientHeight;
+    const dpr = devicePixelRatio || 1;
+    const actualWidth = Math.round(width * dpr);
+    const actualHeight = Math.round(height * dpr);
+    if (canvas.width !== actualWidth || canvas.height !== actualHeight) {
+      canvas.width = actualWidth;
+      canvas.height = actualHeight;
+      canvas.style.width = `${width}px`;
+      canvas.style.height = `${height}px`;
+    }
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, width, height);
+    ctx.save();
+    ctx.translate(view.x, view.y);
+    ctx.scale(view.z, view.z);
+    if (image) {
+      ctx.drawImage(image, 0, 0);
+      ctx.strokeStyle = '#cad8c8';
+      ctx.lineWidth = 1 / view.z;
+      ctx.strokeRect(0, 0, image.width, image.height);
+    }
+    if ($('showReference').checked && plan().reference) {
+      const reference = plan().reference;
+      ctx.save();
+      ctx.strokeStyle = '#cf443c';
+      ctx.lineWidth = 3 / view.z;
+      ctx.setLineDash([8 / view.z, 5 / view.z]);
+      ctx.beginPath(); ctx.moveTo(reference.x1, reference.y1); ctx.lineTo(reference.x2, reference.y2); ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.fillStyle = '#9b302a';
+      ctx.font = `${15 / view.z}px sans-serif`;
+      ctx.fillText(reference.label, reference.x1, reference.y1 - 12 / view.z);
+      ctx.restore();
+    }
+    items().forEach(drawItem);
+    if (lineStart && lineEnd) {
+      ctx.strokeStyle = mode === 'calibrate' ? '#e25f48' : '#32816c';
+      ctx.lineWidth = 3 / view.z;
+      ctx.setLineDash([10 / view.z, 5 / view.z]);
+      ctx.beginPath(); ctx.moveTo(lineStart.x, lineStart.y); ctx.lineTo(lineEnd.x, lineEnd.y); ctx.stroke();
+      ctx.setLineDash([]);
+    }
+    ctx.restore();
+    $('zoomLabel').textContent = `${Math.round(view.z * 100)}%`;
+    $('scaleInfo').textContent = scale()
+      ? `Becsült skála: 1 cm = ${scale().toFixed(2)} px · Az eredeti rajz nem mindenütt arányos!`
+      : '⚠ Méretarány kalibrálása szükséges a pontos bútorokhoz';
+  }
+
+  function fit() {
+    if (!image) return;
+    const width = wrap.clientWidth;
+    const height = wrap.clientHeight;
+    view.z = Math.min((width - 60) / image.width, (height - 60) / image.height);
+    view.x = (width - image.width * view.z) / 2;
+    view.y = (height - image.height * view.z) / 2;
+    draw();
+  }
+
+  function zoom(factor, at = { x: wrap.clientWidth / 2, y: wrap.clientHeight / 2 }) {
+    const origin = world(at);
+    view.z = clamp(view.z * factor, 0.15, 7);
+    view.x = at.x - origin.x * view.z;
+    view.y = at.y - origin.y * view.z;
+    draw();
+  }
+
+  function hit(point) {
+    for (const item of [...items()].reverse()) {
+      const size = furnitureSize(item);
+      const dx = point.x - item.x;
+      const dy = point.y - item.y;
+      const angle = -rad(item.rot);
+      const x = dx * Math.cos(angle) - dy * Math.sin(angle);
+      const y = dx * Math.sin(angle) + dy * Math.cos(angle);
+      if (x >= 0 && y >= 0 && x <= size.w && y <= size.h) return item;
+    }
+    return null;
+  }
+
+  function setMode(value) {
+    mode = value;
+    lineStart = lineEnd = null;
+    ['select', 'calibrate', 'measure', 'pan'].forEach(name => {
+      $(`mode${name[0].toUpperCase()}${name.slice(1)}`).classList.toggle('selected', value === name);
+    });
+    $('hintMode').textContent = {
+      select: 'Húzd a bútorokat a helyükre.',
+      calibrate: 'Kattints egy ismert hosszúság két végpontjára.',
+      measure: 'Kattints két pontra a távolság méréséhez.',
+      pan: 'Húzd az alaprajzot a nézet mozgatásához.'
+    }[value];
+    canvas.style.cursor = value === 'pan' ? 'grab' : ['calibrate', 'measure'].includes(value) ? 'crosshair' : 'default';
+    draw();
+  }
+
+  function renderRooms() {
+    const container = $('rooms');
+    container.innerHTML = '';
+    for (const roomPlan of allPlans()) {
+      const roomData = data.rooms[roomPlan.id];
+      if (!roomData) continue;
+      const row = document.createElement('div');
+      row.className = `room-row${roomId === roomPlan.id ? ' active' : ''}`;
+      const button = document.createElement('button');
+      button.className = 'room';
+      const thumbnail = document.createElement('img');
+      thumbnail.src = roomPlan.url;
+      thumbnail.alt = '';
+      const label = document.createElement('span');
+      label.textContent = roomData.name;
+      button.append(thumbnail, label);
+      button.onclick = () => openRoom(roomPlan.id);
+      row.append(button);
+      if (roomPlan.isCustom) {
+        const remove = document.createElement('button');
+        remove.className = 'room-remove danger';
+        remove.title = 'Saját alaprajz törlése';
+        remove.textContent = '×';
+        remove.onclick = () => deleteCustomPlan(roomPlan.id);
+        row.append(remove);
+      }
+      container.append(row);
+    }
+  }
+
+  function deleteCustomPlan(id) {
+    const target = data.customPlans.find(value => value.id === id);
+    if (!target || !confirm(`Biztosan törlöd ezt a saját alaprajzot és minden berendezési változatát?\n\n${data.rooms[id]?.name || target.name}`)) return;
+    data.customPlans = data.customPlans.filter(value => value.id !== id);
+    delete data.rooms[id];
+    if (roomId === id) {
+      roomId = 'room1';
+      data.currentRoom = roomId;
+    }
+    save();
+    openRoom(roomId, false);
+  }
+
+  function catalogSvg(type, isIkea) {
+    const accent = isIkea ? '#244e3e' : '#7b806f';
+    const fill = isIkea ? '#e8eee5' : '#ece8df';
+    const common = `fill="${fill}" stroke="${accent}" stroke-width="1.4"`;
+    const artByType = {
+      sofa: `<rect x="5" y="8" width="60" height="42" rx="7" ${common}/><rect x="11" y="16" width="48" height="27" rx="5" fill="#fff" stroke="${accent}"/><path d="M26 17v25M44 17v25" stroke="${accent}" opacity=".45"/><path d="M8 10v38M62 10v38" stroke="${accent}" stroke-width="5"/>`,
+      armchair: `<rect x="15" y="7" width="40" height="45" rx="9" ${common}/><rect x="21" y="15" width="28" height="28" rx="5" fill="#fff" stroke="${accent}"/><path d="M17 9v40M53 9v40" stroke="${accent}" stroke-width="5"/>`,
+      bed: `<rect x="13" y="4" width="44" height="51" rx="4" ${common}/><rect x="17" y="11" width="17" height="12" rx="3" fill="#fff"/><rect x="36" y="11" width="17" height="12" rx="3" fill="#fff"/><rect x="17" y="27" width="36" height="23" rx="3" fill="#c7d7d0"/>`,
+      wardrobe: `<rect x="5" y="13" width="60" height="32" rx="3" ${common}/><path d="M25 14v30M45 14v30" stroke="${accent}"/><circle cx="22" cy="29" r="1.5" fill="${accent}"/><circle cx="42" cy="29" r="1.5" fill="${accent}"/>`,
+      chair: `<rect x="18" y="12" width="34" height="36" rx="7" ${common}/><path d="M20 18h30" stroke="${accent}" stroke-width="5"/>`,
+      shelf: `<rect x="7" y="14" width="56" height="30" rx="3" ${common}/><path d="M21 15v28M35 15v28M49 15v28M8 29h54" stroke="${accent}"/>`,
+      table: `<rect x="6" y="11" width="58" height="36" rx="7" ${common}/><circle cx="13" cy="18" r="3" fill="${accent}"/><circle cx="57" cy="18" r="3" fill="${accent}"/><circle cx="13" cy="40" r="3" fill="${accent}"/><circle cx="57" cy="40" r="3" fill="${accent}"/>`
+    };
+    return `<svg viewBox="0 0 70 58" aria-hidden="true">${artByType[type] || artByType.table}</svg>`;
+  }
+
+  function populateCategoryFilter() {
+    const select = $('catalogCategory');
+    const previous = select.value;
+    select.innerHTML = '<option value="all">Minden kategória</option>';
+    if (catalogTab !== 'basic') {
+      Object.entries(Ikea.categories).forEach(([value, label]) => {
+        const option = document.createElement('option');
+        option.value = value;
+        option.textContent = label;
+        select.append(option);
+      });
+      select.hidden = false;
+      select.value = [...select.options].some(option => option.value === previous) ? previous : 'all';
+    } else {
+      select.hidden = true;
+      select.value = 'all';
+    }
+  }
+
+  function isFavorite(productId) {
+    return favorites.some(value => value.productId === productId);
+  }
+
+  function toggleFavorite(product) {
+    const normalized = Core.normalizeProduct(product);
+    if (isFavorite(normalized.productId)) favorites = favorites.filter(value => value.productId !== normalized.productId);
+    else favorites = [...favorites, normalized];
+    try {
+      favorites = Core.saveFavorites(localStorage, favorites);
+      renderCatalog();
+      flash(isFavorite(normalized.productId) ? 'Hozzáadva a kedvencekhez.' : 'Eltávolítva a kedvencekből.');
+    } catch {
+      flash('A kedvencek mentése nem sikerült.');
+    }
+  }
+
+  function renderCatalog() {
+    const container = $('catalog');
+    const query = ($('catalogSearch').value || '').toLocaleLowerCase('hu').trim();
+    const category = $('catalogCategory').value || 'all';
+    const source = catalogTab === 'ikea' ? Ikea.products : catalogTab === 'favorites' ? favorites : BASIC_CATALOG;
+    const filtered = source.filter(product => {
+      const haystack = `${product.name} ${product.productId || ''} ${product.type || ''}`.toLocaleLowerCase('hu');
+      return haystack.includes(query) && (category === 'all' || product.category === category);
+    });
+
+    container.innerHTML = '';
+    for (const product of filtered) {
+      const isIkea = catalogTab !== 'basic';
+      const card = document.createElement('article');
+      card.className = `catalog-card${isIkea ? ' ikea-card' : ''}`;
+      const add = document.createElement('button');
+      add.className = 'catalog-add';
+      add.innerHTML = `${catalogSvg(product.type, isIkea)}<strong></strong><small></small>`;
+      add.querySelector('strong').textContent = product.name;
+      add.querySelector('small').textContent = `${product.width} × ${product.depth} cm${product.productId ? ` · ${product.productId}` : ''}`;
+      add.onclick = () => isIkea ? addProduct(product) : addBasicItem(product);
+      card.append(add);
+      if (isIkea) {
+        const favorite = document.createElement('button');
+        favorite.className = `favorite-button${isFavorite(product.productId) ? ' active' : ''}`;
+        favorite.title = isFavorite(product.productId) ? 'Eltávolítás a kedvencekből' : 'Mentés a kedvencekhez';
+        favorite.setAttribute('aria-label', favorite.title);
+        favorite.textContent = isFavorite(product.productId) ? '♥' : '♡';
+        favorite.onclick = () => toggleFavorite(product);
+        card.append(favorite);
+      }
+      container.append(card);
+    }
+    $('catalogCount').textContent = `${filtered.length} darab`;
+    $('favoriteCount').textContent = favorites.length;
+    $('catalogEmpty').hidden = filtered.length > 0;
+    document.querySelectorAll('[data-catalog-tab]').forEach(button => {
+      const active = button.dataset.catalogTab === catalogTab;
+      button.classList.toggle('selected', active);
+      button.setAttribute('aria-selected', String(active));
+    });
+  }
+
+  function addBasicItem(product) {
+    const center = world({ x: wrap.clientWidth / 2, y: wrap.clientHeight / 2 });
+    const value = scale() || 2;
+    const item = {
+      id: idFactory(), type: product.type, name: product.name, w: product.width, h: product.depth,
+      rot: 0, x: center.x - product.width * value / 2, y: center.y - product.depth * value / 2
+    };
+    items().push(item);
+    selected = item.id;
+    save();
+    renderProps();
+    draw();
+    flash(`Hozzáadva: ${product.name}`);
+  }
+
+  function addProduct(product) {
+    try {
+      const center = world({ x: wrap.clientWidth / 2, y: wrap.clientHeight / 2 });
+      const value = scale() || 2;
+      const item = Core.createFurnitureItem(product, {
+        x: center.x - Number(product.width) * value / 2,
+        y: center.y - Number(product.depth) * value / 2
+      }, idFactory);
+      items().push(item);
+      selected = item.id;
+      save();
+      renderProps();
+      draw();
+      flash(`Hozzáadva: ${product.name} · ${product.width} × ${product.depth} cm`);
+    } catch (error) {
+      flash(error.message || 'A termék nem adható hozzá.');
+    }
+  }
+
+  function renderVariants() {
+    const select = $('variant');
+    select.innerHTML = '';
+    Object.keys(room().variants).forEach(name => {
+      const option = document.createElement('option');
+      option.value = name;
+      option.textContent = name;
+      select.append(option);
+    });
+    select.value = room().active;
+  }
+
+  function renderProps() {
+    const container = $('props');
+    const item = items().find(value => value.id === selected);
+    container.innerHTML = '';
+    if (!item) {
+      container.innerHTML = '<p class="hint">Válassz egy bútort a terven, vagy adj hozzá egyet a bal oldali katalógusból.</p>';
+      return;
+    }
+
+    if (item.source === 'ikea') {
+      const metadata = document.createElement('div');
+      metadata.className = 'product-meta';
+      const changed = item.originalDimensions && (item.w !== item.originalDimensions.width || item.h !== item.originalDimensions.depth);
+      metadata.innerHTML = '<span class="ikea-badge">IKEA</span><strong></strong><small></small>';
+      metadata.querySelector('strong').textContent = item.productId || 'Cikkszám nélkül';
+      metadata.querySelector('small').textContent = item.originalDimensions
+        ? `Eredeti méret: ${item.originalDimensions.width} × ${item.originalDimensions.depth} cm${item.originalDimensions.height ? ` · M ${item.originalDimensions.height} cm` : ''}`
+        : 'Importált termék';
+      if (changed) {
+        const warning = document.createElement('em');
+        warning.textContent = 'A terven átméretezve';
+        metadata.append(warning);
+      }
+      container.append(metadata);
+    }
+
+    const addField = (label, key, type = 'number', step = '1') => {
+      const box = document.createElement('div');
+      box.className = 'field';
+      const fieldLabel = document.createElement('label');
+      fieldLabel.textContent = label;
+      const input = document.createElement('input');
+      input.type = type;
+      input.value = item[key];
+      if (type === 'number') {
+        input.min = key === 'rot' ? '-360' : '0.1';
+        input.max = key === 'rot' ? '360' : '5000';
+        input.step = step;
+      }
+      input.addEventListener('change', () => {
+        const value = type === 'number' ? Number(input.value) : input.value.trim();
+        if ((type === 'number' && (!Number.isFinite(value) || (key !== 'rot' && value <= 0))) || (type === 'text' && !value)) {
+          input.value = item[key];
+          return;
+        }
+        item[key] = value;
+        save();
+        renderProps();
+        draw();
+      });
+      box.append(fieldLabel, input);
+      container.append(box);
+    };
+
+    addField('Megnevezés', 'name', 'text');
+    addField('Szélesség (cm)', 'w');
+    addField('Mélység (cm)', 'h');
+    addField('Forgatás (°)', 'rot');
+
+    if (item.source === 'ikea') {
+      const links = document.createElement('div');
+      links.className = 'product-links';
+      const productLink = document.createElement('a');
+      productLink.href = item.productUrl;
+      productLink.target = '_blank';
+      productLink.rel = 'noopener noreferrer';
+      productLink.textContent = 'Termékoldal ↗';
+      const product = {
+        name: item.name, productId: item.productId, category: item.category || 'storage', type: item.type,
+        width: item.originalDimensions?.width || item.w, depth: item.originalDimensions?.depth || item.h,
+        height: item.originalDimensions?.height, productUrl: item.productUrl
+      };
+      const favorite = document.createElement('button');
+      favorite.textContent = isFavorite(item.productId) ? '♥ Kedvenc' : '♡ Kedvencekhez';
+      favorite.onclick = () => toggleFavorite(product);
+      links.append(productLink, favorite);
+      container.append(links);
+    }
+
+    const buttons = document.createElement('div');
+    buttons.className = 'small-actions';
+    const rotate = document.createElement('button');
+    rotate.textContent = '↻ 90°';
+    rotate.onclick = () => {
+      item.rot = (item.rot + 90) % 360;
+      save(); renderProps(); draw();
+    };
+    const duplicate = document.createElement('button');
+    duplicate.textContent = '⧉ Másolat';
+    duplicate.onclick = () => duplicateSelected();
+    const remove = document.createElement('button');
+    remove.textContent = 'Törlés';
+    remove.className = 'danger';
+    remove.onclick = removeSelected;
+    buttons.append(rotate, duplicate, remove);
+    container.append(buttons);
+  }
+
+  function duplicateSelected() {
+    const item = items().find(value => value.id === selected);
+    if (!item) return;
+    const copy = structuredClone(item);
+    copy.id = idFactory();
+    copy.x += 28;
+    copy.y += 28;
+    items().push(copy);
+    selected = copy.id;
+    save(); renderProps(); draw();
+  }
+
+  function removeSelected() {
+    if (!selected) return;
+    room().variants[room().active].items = items().filter(item => item.id !== selected);
+    selected = null;
+    save(); renderProps(); draw();
+  }
+
+  function openRoom(id, recordChange = true) {
+    if (!data.rooms[id]) id = 'room1';
+    roomId = id;
+    data.currentRoom = id;
+    selected = null;
+    lineStart = lineEnd = null;
+    image = new Image();
+    image.onload = () => {
+      fit();
+      renderRooms();
+      renderVariants();
+      renderProps();
+      save(recordChange);
+      flash(`Megnyitva: ${room().name} · Ellenőrizd a méretarányt!`, 6500);
+    };
+    image.onerror = () => flash('Nem sikerült betölteni az alaprajzot.');
+    image.src = plan().url;
+    renderRooms();
+  }
+
+  function ask(title, hint, fields) {
+    return new Promise(resolve => {
+      const dialog = $('dialog');
+      const container = $('dialogFields');
+      $('dialogTitle').textContent = title;
+      $('dialogHint').textContent = hint;
+      container.innerHTML = '';
+      for (const definition of fields) {
+        const box = document.createElement('div');
+        box.className = 'field';
+        const label = document.createElement('label');
+        label.textContent = definition.label;
+        const input = document.createElement('input');
+        input.name = definition.key;
+        input.value = definition.value ?? '';
+        input.type = definition.type || 'text';
+        input.required = definition.required !== false;
+        if (input.type === 'number') {
+          input.min = definition.min ?? '0.01';
+          input.max = definition.max ?? '5000';
+          input.step = 'any';
+        }
+        box.append(label, input);
+        container.append(box);
+      }
+      dialog.showModal();
+      const close = () => {
+        if (dialog.returnValue !== 'ok') return resolve(null);
+        const result = {};
+        fields.forEach(definition => { result[definition.key] = container.querySelector(`[name="${definition.key}"]`).value; });
+        resolve(result);
+      };
+      dialog.addEventListener('close', close, { once: true });
+    });
+  }
+
+  function fillImportFields(product, locked = false) {
+    $('ikeaName').value = product.name || '';
+    $('ikeaProductId').value = product.productId || '';
+    $('ikeaWidth').value = product.width || '';
+    $('ikeaDepth').value = product.depth || '';
+    $('ikeaHeight').value = product.height || '';
+    $('ikeaCategory').value = product.category || 'storage';
+    ['ikeaName', 'ikeaProductId', 'ikeaWidth', 'ikeaDepth', 'ikeaHeight'].forEach(id => {
+      $(id).readOnly = locked;
+    });
+    $('ikeaCategory').disabled = locked;
+  }
+
+  function resolveIkeaUrl() {
+    const parsed = Core.parseIkeaProductUrl($('ikeaUrl').value);
+    resolvedImport = null;
+    $('ikeaManualFields').hidden = true;
+    $('ikeaImportOk').disabled = true;
+    $('ikeaSourceLink').hidden = true;
+    if (!parsed.ok) {
+      $('ikeaImportStatus').className = 'import-status error';
+      $('ikeaImportStatus').textContent = parsed.error;
+      return;
+    }
+    $('ikeaUrl').value = parsed.productUrl;
+    $('ikeaSourceLink').href = parsed.productUrl;
+    $('ikeaSourceLink').hidden = false;
+    const known = Ikea.products.find(product => product.productId === parsed.productId);
+    if (known) {
+      resolvedImport = known;
+      fillImportFields(known, true);
+      $('ikeaImportStatus').className = 'import-status success';
+      $('ikeaImportStatus').textContent = `Felismert termék: ${known.name}. A méreteket a ${Ikea.verifiedAt} napján ellenőrzött helyi katalógusból töltöttük be.`;
+    } else {
+      fillImportFields({
+        name: parsed.suggestedName,
+        productId: parsed.productId,
+        category: 'storage'
+      }, false);
+      $('ikeaImportStatus').className = 'import-status warning';
+      $('ikeaImportStatus').textContent = 'Ehhez a termékhez nincs ellenőrzött helyi adat. Nyisd meg a linket, és másold be a termékoldalon szereplő külső méreteket. Nem következtetünk hiányzó adatra.';
+    }
+    $('ikeaManualFields').hidden = false;
+    $('ikeaImportOk').disabled = false;
+  }
+
+  function readImportForm() {
+    if (resolvedImport) return Core.normalizeProduct(resolvedImport);
+    const value = {
+      name: $('ikeaName').value,
+      productId: $('ikeaProductId').value,
+      productUrl: $('ikeaUrl').value,
+      width: $('ikeaWidth').value,
+      depth: $('ikeaDepth').value,
+      height: $('ikeaHeight').value,
+      category: $('ikeaCategory').value,
+      type: resolvedImport?.type || productTypeForCategory($('ikeaCategory').value)
+    };
+    return Core.normalizeProduct(value);
+  }
+
+  function openIkeaDialog() {
+    resolvedImport = null;
+    $('ikeaForm').reset();
+    $('ikeaManualFields').hidden = true;
+    $('ikeaImportOk').disabled = true;
+    $('ikeaSourceLink').hidden = true;
+    fillImportFields({}, false);
+    $('ikeaImportStatus').className = 'import-status';
+    $('ikeaImportStatus').textContent = 'Nem végzünk háttérben webes adatgyűjtést vagy jogosulatlan scrapinget.';
+    $('ikeaDialog').showModal();
+    setTimeout(() => $('ikeaUrl').focus(), 0);
+  }
+
+  function download(name, blob) {
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.download = name;
+    anchor.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
+
+  canvas.addEventListener('pointerdown', event => {
+    event.preventDefault();
+    canvas.setPointerCapture(event.pointerId);
+    const point = localPoint(event);
+    const location = world(point);
+    if (mode === 'pan' || spaceDown || event.button === 1) {
+      drag = { type: 'pan', start: point, view: { ...view } };
+      return;
+    }
+    if (mode === 'calibrate' || mode === 'measure') {
+      if (!lineStart) {
+        lineStart = location;
+        lineEnd = location;
+        flash('Válaszd ki a második pontot.', 0);
+      } else {
+        lineEnd = location;
+        const length = Math.hypot(location.x - lineStart.x, location.y - lineStart.y);
+        if (length < 3) {
+          flash('A kijelölt szakasz túl rövid.');
+          lineStart = lineEnd = null;
+          draw();
+          return;
+        }
+        if (mode === 'calibrate') {
+          ask('Méretarány beállítása', 'Add meg a kijelölt szakasz valós hosszát centiméterben.', [
+            { key: 'cm', label: 'Valós hossz (cm)', value: '100', type: 'number' }
+          ]).then(value => {
+            if (value && Number(value.cm) > 0) {
+              const nextScale = length / Number(value.cm);
+              room().pxPerCm = nextScale;
+              save();
+              flash(`Méretarány beállítva: 1 cm = ${nextScale.toFixed(2)} px`);
+              setMode('select');
+            }
+            lineStart = lineEnd = null;
+            draw();
+          });
+        } else {
+          if (scale()) flash(`Mért távolság: ${(length / scale()).toFixed(1)} cm`, 8000);
+          else flash('Előbb kalibráld az alaprajz méretarányát.');
+          lineStart = lineEnd = null;
+        }
+      }
+      draw();
+      return;
+    }
+    const item = hit(location);
+    selected = item?.id || null;
+    if (item) drag = { type: 'furniture', id: item.id, from: location, x: item.x, y: item.y };
+    renderProps();
+    draw();
+  });
+
+  canvas.addEventListener('pointermove', event => {
+    const point = localPoint(event);
+    const location = world(point);
+    if (drag?.type === 'pan') {
+      view.x = drag.view.x + point.x - drag.start.x;
+      view.y = drag.view.y + point.y - drag.start.y;
+      draw();
+    } else if (drag?.type === 'furniture') {
+      const item = items().find(value => value.id === drag.id);
+      if (item) {
+        item.x = drag.x + location.x - drag.from.x;
+        item.y = drag.y + location.y - drag.from.y;
+        draw();
+      }
+    } else if (lineStart && !drag) {
+      lineEnd = location;
+      draw();
+    }
+  });
+
+  function endDrag() {
+    if (drag?.type === 'furniture') {
+      const item = items().find(value => value.id === drag.id);
+      if (item && snapEnabled) {
+        const unit = (scale() || 2) * 5;
+        item.x = Math.round(item.x / unit) * unit;
+        item.y = Math.round(item.y / unit) * unit;
+      }
+      save(); renderProps(); draw();
+    }
+    drag = null;
+  }
+
+  canvas.addEventListener('pointerup', endDrag);
+  canvas.addEventListener('pointercancel', endDrag);
+  canvas.addEventListener('wheel', event => {
+    event.preventDefault();
+    zoom(Math.exp(-event.deltaY * 0.0014), localPoint(event));
+  }, { passive: false });
+
+  window.addEventListener('keydown', event => {
+    const typing = ['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement?.tagName);
+    if (!typing && (event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'z') {
+      event.preventDefault(); event.shiftKey ? redo() : undo(); return;
+    }
+    if (!typing && (event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'y') {
+      event.preventDefault(); redo(); return;
+    }
+    if (!typing && (event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'd' && selected) {
+      event.preventDefault(); duplicateSelected(); return;
+    }
+    if (!typing && selected && ['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(event.key)) {
+      event.preventDefault();
+      const item = items().find(value => value.id === selected);
+      if (item) {
+        const step = (event.shiftKey ? 10 : 1) * (scale() || 2);
+        if (event.key === 'ArrowLeft') item.x -= step;
+        if (event.key === 'ArrowRight') item.x += step;
+        if (event.key === 'ArrowUp') item.y -= step;
+        if (event.key === 'ArrowDown') item.y += step;
+        save(); draw();
+      }
+      return;
+    }
+    if (event.code === 'Space' && !typing) { event.preventDefault(); spaceDown = true; }
+    if (event.key === 'Escape') { selected = null; lineStart = lineEnd = null; renderProps(); draw(); }
+    if (!typing && (event.key === 'Delete' || event.key === 'Backspace')) removeSelected();
+  });
+  window.addEventListener('keyup', event => { if (event.code === 'Space') spaceDown = false; });
+  window.addEventListener('resize', draw);
+
+  ['select', 'calibrate', 'measure', 'pan'].forEach(name => {
+    $(`mode${name[0].toUpperCase()}${name.slice(1)}`).onclick = () => setMode(name);
+  });
+  $('zoomOut').onclick = () => zoom(1 / 1.25);
+  $('zoomIn').onclick = () => zoom(1.25);
+  $('fit').onclick = fit;
+  $('undo').onclick = undo;
+  $('redo').onclick = redo;
+  $('showReference').onchange = draw;
+
+  $('snap').onclick = () => {
+    snapEnabled = !snapEnabled;
+    $('snap').classList.toggle('selected', snapEnabled);
+    $('snap').setAttribute('aria-pressed', String(snapEnabled));
+    $('snap').textContent = `⊞ 5 cm rács: ${snapEnabled ? 'be' : 'ki'}`;
+  };
+
+  $('variant').onchange = event => {
+    room().active = event.target.value;
+    selected = null;
+    save(); renderProps(); draw();
+  };
+
+  $('newVariant').onclick = async () => {
+    const answer = await ask('Új berendezési változat', 'A jelenlegi változat bútorait lemásoljuk.', [
+      { key: 'name', label: 'Változat neve', value: 'Új változat' }
+    ]);
+    const name = answer?.name?.trim();
+    if (!name) return;
+    if (room().variants[name]) return flash('Már létezik ilyen nevű változat.');
+    room().variants[name] = { items: structuredClone(items()) };
+    room().active = name;
+    selected = null;
+    save(); renderVariants(); renderProps(); draw();
+  };
+
+  $('deleteVariant').onclick = () => {
+    if (Object.keys(room().variants).length < 2) return flash('Az utolsó változat nem törölhető.');
+    if (!confirm('Biztosan törlöd ezt a változatot?')) return;
+    delete room().variants[room().active];
+    room().active = Object.keys(room().variants)[0];
+    selected = null;
+    save(); renderVariants(); renderProps(); draw();
+  };
+
+  $('renameRoom').onclick = async () => {
+    const answer = await ask('Helyiség átnevezése', 'Adj beszédes nevet az alaprajznak.', [
+      { key: 'name', label: 'Helyiség neve', value: room().name }
+    ]);
+    if (answer?.name?.trim()) {
+      room().name = answer.name.trim();
+      save(); renderRooms();
+    }
+  };
+
+  $('resetRoom').onclick = () => {
+    if (!confirm('Töröljük az aktuális változat összes bútorát?')) return;
+    room().variants[room().active].items = [];
+    selected = null;
+    save(); renderProps(); draw();
+  };
+
+  $('customFurniture').onclick = async () => {
+    const value = await ask('Egyedi méretű bútor', 'Add meg a bútor pontos méretét centiméterben.', [
+      { key: 'name', label: 'Megnevezés', value: 'Saját bútor' },
+      { key: 'w', label: 'Szélesség (cm)', value: '120', type: 'number' },
+      { key: 'h', label: 'Mélység (cm)', value: '60', type: 'number' }
+    ]);
+    if (value && Number(value.w) > 0 && Number(value.h) > 0) {
+      addBasicItem({ type: 'custom', name: value.name.trim() || 'Saját bútor', width: Number(value.w), depth: Number(value.h) });
+    }
+  };
+
+  $('floorPlanUpload').onchange = event => {
+    const file = event.target.files?.[0];
+    event.target.value = '';
+    if (!file) return;
+    if (!/^image\/(png|jpeg|webp)$/.test(file.type)) return flash('PNG, JPEG vagy WebP alaprajz tölthető fel.');
+    if (file.size > 3 * 1024 * 1024) return flash('A helyi mentés védelmében legfeljebb 3 MB-os alaprajz tölthető fel.', 8000);
+    const reader = new FileReader();
+    reader.onerror = () => flash('A képfájl nem olvasható.');
+    reader.onload = async () => {
+      const testImage = new Image();
+      testImage.onerror = () => flash('A kiválasztott fájl nem érvényes kép.');
+      testImage.onload = async () => {
+        const answer = await ask('Saját alaprajz', 'A kép külön helyiségként kerül a tervek közé. Ezután kalibráld egy ismert szakasz alapján.', [
+          { key: 'name', label: 'Helyiség neve', value: file.name.replace(/\.[^.]+$/, '') || 'Saját alaprajz' }
+        ]);
+        if (!answer?.name?.trim()) return;
+        const id = `custom-${idFactory()}`;
+        const custom = { id, name: answer.name.trim(), url: String(reader.result), pxPerCm: null, reference: null, isCustom: true };
+        data.customPlans.push(custom);
+        data.rooms[id] = { name: custom.name, pxPerCm: null, active: 'Alap', variants: { Alap: emptyVariant() } };
+        if (!save()) {
+          data.customPlans = data.customPlans.filter(value => value.id !== id);
+          delete data.rooms[id];
+          return;
+        }
+        openRoom(id, false);
+        setMode('calibrate');
+      };
+      testImage.src = String(reader.result);
+    };
+    reader.readAsDataURL(file);
+  };
+
+  document.querySelectorAll('[data-catalog-tab]').forEach(button => {
+    button.onclick = () => {
+      catalogTab = button.dataset.catalogTab;
+      populateCategoryFilter();
+      renderCatalog();
+    };
+  });
+  $('catalogSearch').addEventListener('input', renderCatalog);
+  $('catalogCategory').addEventListener('change', renderCatalog);
+
+  Object.entries(Ikea.categories).forEach(([value, label]) => {
+    const option = document.createElement('option');
+    option.value = value;
+    option.textContent = label;
+    $('ikeaCategory').append(option);
+  });
+  $('importIkea').onclick = openIkeaDialog;
+  $('resolveIkea').onclick = resolveIkeaUrl;
+  $('ikeaUrl').addEventListener('keydown', event => {
+    if (event.key === 'Enter') { event.preventDefault(); resolveIkeaUrl(); }
+  });
+  $('ikeaForm').addEventListener('submit', event => {
+    if (event.submitter?.value === 'cancel') return;
+    event.preventDefault();
+    try {
+      const product = readImportForm();
+      addProduct(product);
+      if ($('ikeaSaveFavorite').checked && !isFavorite(product.productId)) {
+        favorites = Core.saveFavorites(localStorage, [...favorites, product]);
+        renderCatalog();
+      }
+      $('ikeaDialog').close('import');
+    } catch (error) {
+      $('ikeaImportStatus').className = 'import-status error';
+      $('ikeaImportStatus').textContent = error.message;
+    }
+  });
+
+  $('exportJSON').onclick = () => {
+    const exportData = structuredClone(data);
+    exportData.favoriteProducts = favorites;
+    exportData.exportedBy = 'Zuglak Studio 1.4';
+    download('zuglak-tervek.json', new Blob([JSON.stringify(exportData, null, 2)], { type: 'application/json' }));
+  };
+
+  $('importJSON').onchange = async event => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    try {
+      const imported = JSON.parse(await file.text());
+      if (!Core.isValidPlanData(imported, ORIGINAL_PLANS.map(value => value.id))) throw new Error('Hibás fájl');
+      if (!confirm('Betöltjük a fájlt? Ez felülírja a böngésző jelenlegi terveit.')) return;
+      const importedFavorites = imported.favoriteProducts;
+      const nextData = structuredClone(imported);
+      delete nextData.favoriteProducts;
+      delete nextData.exportedBy;
+      nextData.customPlans = Array.isArray(nextData.customPlans) ? nextData.customPlans : [];
+      const previousData = data;
+      const previousRoomId = roomId;
+      const previousSelected = selected;
+      data = nextData;
+      roomId = data.currentRoom && data.rooms[data.currentRoom] ? data.currentRoom : 'room1';
+      selected = null;
+      if (!save()) {
+        data = previousData;
+        roomId = previousRoomId;
+        selected = previousSelected;
+        if (history.at(-1) === lastSnapshot) history.pop();
+        future = [];
+        localStorage.setItem(Core.PLAN_STORAGE_KEY, lastSnapshot);
+        updateHistoryButtons();
+        throw new Error('A terv nem fér el a helyi tárhelyen.');
+      }
+      if (Array.isArray(importedFavorites)) {
+        try {
+          favorites = Core.saveFavorites(localStorage, importedFavorites);
+        } catch {
+          flash('A terv betöltődött, de a kedvencek mentéséhez nincs elég hely.', 8000);
+        }
+      }
+      populateCategoryFilter();
+      renderCatalog();
+      openRoom(roomId, false);
+      flash('Sikeres tervbetöltés.');
+    } catch (error) {
+      flash(error?.message === 'A terv nem fér el a helyi tárhelyen.'
+        ? error.message
+        : 'A JSON nem érvényes Zuglak tervfájl.');
+    } finally {
+      event.target.value = '';
+    }
+  };
+
+  $('exportPNG').onclick = () => {
+    if (!image) return;
+    const output = document.createElement('canvas');
+    output.width = image.width;
+    output.height = image.height;
+    const previousContext = ctx;
+    const previousSelected = selected;
+    const previousZoom = view.z;
+    try {
+      ctx = output.getContext('2d');
+      ctx.drawImage(image, 0, 0);
+      selected = null;
+      view.z = 1;
+      items().forEach(drawItem);
+    } finally {
+      ctx = previousContext;
+      selected = previousSelected;
+      view.z = previousZoom;
+    }
+    output.toBlob(blob => {
+      if (blob) download(`zuglak-${room().name.replace(/\W/g, '_')}-${room().active}.png`, blob);
+    }, 'image/png');
+  };
+
+  updateHistoryButtons();
+  populateCategoryFilter();
+  renderCatalog();
+  openRoom(roomId, false);
+  setMode('select');
 })();
