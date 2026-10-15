@@ -1,5 +1,5 @@
 /*
- * Zuglak Studio 1.4 – curated IKEA Hungary starter catalogue.
+ * Zuglak Studio 1.5 – curated IKEA Hungary starter catalogue (preserved from 1.4).
  *
  * Product measurements are the assembled product's outside dimensions in cm,
  * checked against the linked public IKEA Hungary product pages on 2026-10-15.

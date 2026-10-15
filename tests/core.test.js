@@ -74,7 +74,7 @@ test('favorites persist across reload, deduplicate, and ignore corrupt entries',
   assert.deepEqual(Core.loadFavorites(storage), []);
 });
 
-test('legacy v1 plan data loads without migration or data loss', () => {
+test('legacy v1 plan data migrates without losing existing room content', () => {
   const legacy = {
     version: 1,
     currentRoom: 'room2',
@@ -86,8 +86,47 @@ test('legacy v1 plan data loads without migration or data loss', () => {
   };
   const storage = new MemoryStorage({ [Core.PLAN_STORAGE_KEY]: JSON.stringify(legacy) });
   const loaded = Core.loadPlan(storage, () => ({ fallback: true }), ['room1', 'room2', 'room3']);
+  assert.equal(loaded.version, 2);
   assert.equal(loaded.currentRoom, 'room2');
   assert.equal(loaded.rooms.room2.variants.Alap.items[0].id, 'kept');
+  assert.deepEqual(loaded.rooms.room2.geometries, []);
+  assert.equal(loaded.rooms.room2.activeGeometryId, null);
+  assert.equal(JSON.parse(storage.getItem(Core.LEGACY_BACKUP_KEY)).version, 1);
+});
+
+test('legacy data still loads when browser quota prevents writing the migration backup', () => {
+  const legacy = {
+    version: 1,
+    rooms: {
+      room1: { active: 'Alap', variants: { Alap: { items: [{ id: 'safe' }] } } },
+      room2: { active: 'Alap', variants: { Alap: { items: [] } } },
+      room3: { active: 'Alap', variants: { Alap: { items: [] } } }
+    }
+  };
+  const storage = new MemoryStorage({ [Core.PLAN_STORAGE_KEY]: JSON.stringify(legacy) });
+  storage.setItem = () => { throw new DOMException('Quota exceeded', 'QuotaExceededError'); };
+  const loaded = Core.loadPlan(storage, () => ({ fallback: true }), ['room1', 'room2', 'room3']);
+  assert.equal(loaded.version, 2);
+  assert.equal(loaded.rooms.room1.variants.Alap.items[0].id, 'safe');
+});
+
+test('v2 plan geometry survives saving and loading without changing user coordinates', () => {
+  const plan = {
+    version: 2,
+    currentRoom: 'room1',
+    rooms: {
+      room1: {
+        active: 'Alap', variants: { Alap: { items: [] } }, activeGeometryId: 'g1',
+        geometries: [{ id: 'g1', name: 'Pontos', closed: true, confirmedWalls: [true, true, true], vertices: [{ id: 'a', x: 10.25, y: 20.5 }, { id: 'b', x: 310.25, y: 20.5 }, { id: 'c', x: 10.25, y: 220.5 }], objects: [{ id: 'd1', type: 'door', wallIndex: 0, offset: 80, width: 90, hinge: 'start', swing: 'in' }] }]
+      },
+      room2: { active: 'Alap', variants: { Alap: { items: [] } } },
+      room3: { active: 'Alap', variants: { Alap: { items: [] } } }
+    }
+  };
+  const storage = new MemoryStorage({ [Core.PLAN_STORAGE_KEY]: JSON.stringify(plan) });
+  const loaded = Core.loadPlan(storage, () => plan, ['room1', 'room2', 'room3']);
+  assert.deepEqual(loaded.rooms.room1.geometries[0], plan.rooms.room1.geometries[0]);
+  assert.equal(storage.getItem(Core.LEGACY_BACKUP_KEY), null);
 });
 
 test('every curated product has valid unique metadata and supported dimensions', () => {

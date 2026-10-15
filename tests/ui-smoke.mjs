@@ -89,6 +89,11 @@ try {
     }
     throw new Error(`Időtúllépés: ${expression}`);
   };
+  const clickCanvas = async (x, y) => {
+    const point = await evaluate(`(() => { const rect = document.querySelector('#stage').getBoundingClientRect(); return { x: rect.left + ${x}, y: rect.top + ${y} }; })()`);
+    await call('Input.dispatchMouseEvent', { type: 'mousePressed', x: point.x, y: point.y, button: 'left', clickCount: 1 });
+    await call('Input.dispatchMouseEvent', { type: 'mouseReleased', x: point.x, y: point.y, button: 'left', clickCount: 1 });
+  };
 
   await call('Runtime.enable');
   await waitFor(`document.readyState === 'complete' && document.querySelectorAll('.catalog-card').length === 11`);
@@ -123,8 +128,43 @@ try {
   const beforeDuplicate = await evaluate(`JSON.parse(localStorage.getItem('zuglak-v2')).rooms.room1.variants.Alap.items.length`);
   await evaluate(`document.querySelectorAll('#props .small-actions button')[1].click()`);
   assert.equal(await evaluate(`JSON.parse(localStorage.getItem('zuglak-v2')).rooms.room1.variants.Alap.items.length`), beforeDuplicate + 1);
+  assert.equal(await evaluate(`document.querySelector('#warnings').hidden`), false);
+  assert.match(await evaluate(`document.querySelector('#warnings').textContent`), /átfedésben/);
   await evaluate(`document.querySelectorAll('#props .small-actions button')[2].click()`);
   assert.equal(await evaluate(`JSON.parse(localStorage.getItem('zuglak-v2')).rooms.room1.variants.Alap.items.length`), beforeDuplicate);
+
+  await evaluate(`document.querySelector('#modeWalls').click()`);
+  await evaluate(`document.querySelector('#newGeometry').click()`);
+  await waitFor(`document.querySelector('#dialog').open`);
+  await evaluate(`(() => { document.querySelector('#dialogFields input').value = 'Pontos tesztgeometria'; document.querySelector('#dialogOk').click(); })()`);
+  for (const point of [[150, 120], [350, 120], [350, 320], [150, 320]]) await clickCanvas(...point);
+  assert.equal(await evaluate(`JSON.parse(localStorage.getItem('zuglak-v2')).rooms.room1.geometries[0].vertices.length`), 4);
+  await evaluate(`document.querySelector('#closeGeometry').click()`);
+  assert.deepEqual(await evaluate(`(() => { const plan = JSON.parse(localStorage.getItem('zuglak-v2')); const geometry = plan.rooms.room1.geometries[0]; return { version: plan.version, closed: geometry.closed, objects: geometry.objects.length }; })()`), { version: 2, closed: true, objects: 0 });
+
+  const tracedLength = await evaluate(`Number(document.querySelector('.wall-length-row input').value)`);
+  await evaluate(`(() => { const input = document.querySelector('.wall-length-row input'); input.value = String(${tracedLength} + 10); input.dispatchEvent(new Event('change', { bubbles: true })); })()`);
+  assert.equal(await evaluate(`JSON.parse(localStorage.getItem('zuglak-v2')).rooms.room1.geometries[0].confirmedWalls[0]`), true);
+
+  await evaluate(`document.querySelector('#modeOpenings').click()`);
+  await evaluate(`document.querySelector('#addDoor').click()`);
+  await clickCanvas(250, 120);
+  await waitFor(`document.querySelector('#dialog').open`);
+  await evaluate(`document.querySelector('#dialogOk').click()`);
+  await waitFor(`JSON.parse(localStorage.getItem('zuglak-v2')).rooms.room1.geometries[0].objects.length === 1`);
+  assert.deepEqual(await evaluate(`(() => { const object = JSON.parse(localStorage.getItem('zuglak-v2')).rooms.room1.geometries[0].objects[0]; return { type: object.type, width: object.width, swing: object.swing }; })()`), { type: 'door', width: 90, swing: 'in' });
+  await evaluate(`document.querySelector('#undo').click()`);
+  assert.equal(await evaluate(`JSON.parse(localStorage.getItem('zuglak-v2')).rooms.room1.geometries[0].objects.length`), 0);
+  await evaluate(`document.querySelector('#redo').click()`);
+  assert.equal(await evaluate(`JSON.parse(localStorage.getItem('zuglak-v2')).rooms.room1.geometries[0].objects.length`), 1);
+
+  await evaluate(`document.querySelector('#modeMeasure').click()`);
+  await clickCanvas(180, 180);
+  await clickCanvas(280, 180);
+  assert.match(await evaluate(`document.querySelector('#status').textContent`), /Mért távolság:/);
+
+  await evaluate(`(() => { document.querySelector('#modeSelect').click(); document.querySelector('#snap').click(); })()`);
+  assert.equal(await evaluate(`document.querySelector('#snap').getAttribute('aria-pressed')`), 'true');
 
   await evaluate(`(async () => { const canvas = document.createElement('canvas'); canvas.width = 20; canvas.height = 20; const blob = await (await fetch(canvas.toDataURL('image/png'))).blob(); const transfer = new DataTransfer(); transfer.items.add(new File([blob], 'sajat-alaprajz.png', { type: 'image/png' })); const input = document.querySelector('#floorPlanUpload'); input.files = transfer.files; input.dispatchEvent(new Event('change', { bubbles: true })); })()`);
   await waitFor(`document.querySelector('#dialog').open`);
@@ -136,7 +176,7 @@ try {
   assert.equal(await evaluate(`getComputedStyle(document.querySelector('.workspace')).display`), 'flex');
   assert.ok(await evaluate(`document.querySelector('main').getBoundingClientRect().width >= 800`));
 
-  console.log('UI smoke: katalógus, keresés, kedvencek, import, szerkesztés, saját alaprajz és tablet nézet rendben.');
+  console.log('UI smoke: 1.4 regressziók, falgeometria, pontos méret, ajtó, mérés, snapping, ütközés és tablet nézet rendben.');
 } finally {
   if (socket?.readyState === WebSocket.OPEN) socket.close();
   if (chrome.exitCode === null) chrome.kill();

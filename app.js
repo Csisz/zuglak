@@ -1,10 +1,11 @@
-/* Zuglak Studio 1.4: offline, local-first 2D furniture editor. */
+/* Zuglak Studio 1.5: offline, local-first smart 2D room planner. */
 (() => {
   'use strict';
 
   const Core = window.ZuglakCore;
+  const Geometry = window.ZuglakGeometry;
   const Ikea = window.ZUGLAK_IKEA_CATALOG;
-  if (!Core || !Ikea) throw new Error('A Zuglak adatmoduljai nem töltődtek be.');
+  if (!Core || !Geometry || !Ikea) throw new Error('A Zuglak adatmoduljai nem töltődtek be.');
 
   // The reference points belong to known-length segments in the original images.
   const ORIGINAL_PLANS = [
@@ -27,14 +28,16 @@
   let ctx = canvas.getContext('2d');
   const emptyVariant = () => ({ items: [] });
   const defaults = () => ({
-    version: 1,
+    version: Core.CURRENT_PLAN_VERSION,
     currentRoom: 'room1',
     customPlans: [],
     rooms: Object.fromEntries(ORIGINAL_PLANS.map(plan => [plan.id, {
       name: plan.name,
       pxPerCm: plan.pxPerCm,
       active: 'Alap',
-      variants: { Alap: emptyVariant() }
+      variants: { Alap: emptyVariant() },
+      geometries: [],
+      activeGeometryId: null
     }]))
   });
 
@@ -57,12 +60,23 @@
   let snapEnabled = false;
   let catalogTab = 'ikea';
   let resolvedImport = null;
+  let selectedVertex = null;
+  let selectedArchitecture = null;
+  let openingTool = null;
+  let snapGuides = [];
+  let warningItemIds = new Set();
+  let lastMeasurement = null;
 
   const allPlans = () => [...ORIGINAL_PLANS, ...data.customPlans];
   const room = () => data.rooms[roomId];
   const items = () => room().variants[room().active].items;
   const plan = () => allPlans().find(value => value.id === roomId) || ORIGINAL_PLANS[0];
   const scale = () => room().pxPerCm;
+  const geometries = () => room().geometries || (room().geometries = []);
+  const activeGeometry = () => geometries().find(value => value.id === room().activeGeometryId) || null;
+  const pointToCm = point => Geometry.pixelToCm(point, scale());
+  const pointToWorld = point => Geometry.cmToPixel(point, scale());
+  const itemToCm = item => ({ ...item, x: item.x / scale(), y: item.y / scale() });
   const idFactory = () => crypto.randomUUID ? crypto.randomUUID() : `i${Date.now()}${Math.random()}`;
   const clamp = (value, min, max) => Math.max(min, Math.min(max, value));
   const rad = degrees => degrees * Math.PI / 180;
@@ -80,6 +94,9 @@
     data.customPlans = Array.isArray(data.customPlans) ? data.customPlans : [];
     roomId = data.currentRoom && data.rooms[data.currentRoom] ? data.currentRoom : 'room1';
     selected = null;
+    selectedVertex = null;
+    selectedArchitecture = null;
+    snapGuides = [];
     lastSnapshot = snapshot;
     localStorage.setItem(Core.PLAN_STORAGE_KEY, snapshot);
     openRoom(roomId, false);
@@ -268,6 +285,186 @@
     ctx.restore();
   }
 
+  function drawPolygon(points, fill, stroke, lineWidth = 1, dashed = false) {
+    if (!points.length) return;
+    ctx.save();
+    ctx.beginPath();
+    ctx.moveTo(points[0].x, points[0].y);
+    points.slice(1).forEach(point => ctx.lineTo(point.x, point.y));
+    ctx.closePath();
+    if (fill) { ctx.fillStyle = fill; ctx.fill(); }
+    if (stroke) {
+      if (dashed) ctx.setLineDash([7 / view.z, 5 / view.z]);
+      ctx.strokeStyle = stroke;
+      ctx.lineWidth = Math.max(0.8 / view.z, lineWidth / view.z);
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+
+  function drawDimensionLabel(start, end, label, color = '#245f4c') {
+    const midpoint = { x: (start.x + end.x) / 2, y: (start.y + end.y) / 2 };
+    ctx.save();
+    ctx.font = `700 ${12 / view.z}px system-ui`;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    const width = ctx.measureText(label).width + 10 / view.z;
+    ctx.fillStyle = '#fffffff0';
+    ctx.fillRect(midpoint.x - width / 2, midpoint.y - 10 / view.z, width, 20 / view.z);
+    ctx.fillStyle = color;
+    ctx.fillText(label, midpoint.x, midpoint.y);
+    ctx.restore();
+  }
+
+  function drawArchitecture(geometry) {
+    for (const object of geometry.objects || []) {
+      const opening = Geometry.openingSegment(object, geometry.vertices);
+      if (!opening) continue;
+      const active = selectedArchitecture?.id === object.id;
+      if (object.type === 'door') {
+        const zoneCm = Geometry.doorClearancePolygon(object, geometry.vertices);
+        const zone = zoneCm.map(pointToWorld);
+        drawPolygon(zone, '#e9856b1f', active ? '#c64e3d' : '#d98670', 1.2, true);
+        const hinge = zone[0];
+        const closedEnd = zone[1];
+        const openEnd = zone.at(-1);
+        drawLine(hinge.x, hinge.y, closedEnd.x, closedEnd.y, active ? '#9d2e27' : '#a85d50', 3 / view.z);
+        drawLine(hinge.x, hinge.y, openEnd.x, openEnd.y, active ? '#9d2e27' : '#a85d50', 2 / view.z);
+        ctx.beginPath();
+        ctx.arc(hinge.x, hinge.y, Math.max(3 / view.z, 4 / view.z), 0, Math.PI * 2);
+        ctx.fillStyle = '#a34f43';
+        ctx.fill();
+      } else if (object.type === 'window') {
+        const a = pointToWorld(opening.a);
+        const b = pointToWorld(opening.b);
+        drawLine(a.x, a.y, b.x, b.y, active ? '#1763a1' : '#4c91be', 7 / view.z);
+        drawLine(a.x, a.y, b.x, b.y, '#dff4ff', 2.5 / view.z);
+      } else if (object.type === 'radiator') {
+        const polygon = Geometry.radiatorPolygon(object, geometry.vertices).map(pointToWorld);
+        drawPolygon(polygon, '#e2b490cc', active ? '#9d4d28' : '#b8734f', 1.5);
+        if (polygon.length === 4) {
+          for (let index = 1; index < 4; index += 1) {
+            const ratio = index / 4;
+            const a = { x: polygon[0].x + (polygon[1].x - polygon[0].x) * ratio, y: polygon[0].y + (polygon[1].y - polygon[0].y) * ratio };
+            const b = { x: polygon[3].x + (polygon[2].x - polygon[3].x) * ratio, y: polygon[3].y + (polygon[2].y - polygon[3].y) * ratio };
+            drawLine(a.x, a.y, b.x, b.y, '#b8734f', 0.8 / view.z);
+          }
+        }
+      }
+    }
+  }
+
+  function drawRoomGeometry() {
+    const geometry = activeGeometry();
+    if (!geometry || !scale() || !geometry.vertices.length) return;
+    const points = geometry.vertices.map(pointToWorld);
+    if (geometry.closed && points.length >= 3) drawPolygon(points, '#4f9b7420', '#287358', 3);
+    else {
+      ctx.save();
+      ctx.beginPath();
+      ctx.moveTo(points[0].x, points[0].y);
+      points.slice(1).forEach(point => ctx.lineTo(point.x, point.y));
+      ctx.strokeStyle = '#287358';
+      ctx.lineWidth = 3 / view.z;
+      ctx.stroke();
+      ctx.restore();
+    }
+    const wallCount = geometry.closed ? points.length : Math.max(0, points.length - 1);
+    for (let index = 0; index < wallCount; index += 1) {
+      const start = points[index];
+      const end = points[(index + 1) % points.length];
+      const cm = Geometry.distance(geometry.vertices[index], geometry.vertices[(index + 1) % points.length]);
+      const confirmed = Boolean(geometry.confirmedWalls?.[index]);
+      drawDimensionLabel(start, end, `${confirmed ? '' : '≈ '}${cm.toFixed(1)} cm`, confirmed ? '#1d644b' : '#866528');
+    }
+    drawArchitecture(geometry);
+    for (let index = 0; index < points.length; index += 1) {
+      const point = points[index];
+      ctx.beginPath();
+      ctx.arc(point.x, point.y, (selectedVertex === index ? 7 : 5) / view.z, 0, Math.PI * 2);
+      ctx.fillStyle = selectedVertex === index ? '#f0a42d' : '#fff';
+      ctx.fill();
+      ctx.strokeStyle = '#21674f';
+      ctx.lineWidth = 2 / view.z;
+      ctx.stroke();
+    }
+  }
+
+  function clearanceDistance() {
+    if ($('clearance80').checked) return 80;
+    if ($('clearance70').checked) return 70;
+    return 0;
+  }
+
+  function drawClearanceGuide() {
+    const item = items().find(value => value.id === selected);
+    const margin = clearanceDistance();
+    if (!item || !margin || !scale()) return;
+    const polygon = Geometry.rotatedRectCorners(itemToCm(item), margin).map(pointToWorld);
+    drawPolygon(polygon, '#3e8bb20d', '#397c9f', 1.5, true);
+    drawDimensionLabel(polygon[0], polygon[1], `${margin} cm-es segédsáv`, '#397c9f');
+  }
+
+  function drawSnapGuides() {
+    if (!scale()) return;
+    for (const guide of snapGuides) {
+      ctx.save();
+      ctx.strokeStyle = guide.type === 'wall' ? '#19a67a' : guide.type === 'furniture' ? '#307fc4' : '#8573bd';
+      ctx.lineWidth = 1.5 / view.z;
+      ctx.setLineDash([7 / view.z, 4 / view.z]);
+      ctx.beginPath();
+      if (guide.a && guide.b) {
+        const a = pointToWorld(guide.a);
+        const b = pointToWorld(guide.b);
+        ctx.moveTo(a.x, a.y);
+        ctx.lineTo(b.x, b.y);
+      } else {
+        const point = pointToWorld({ x: guide.x, y: guide.y });
+        ctx.moveTo(point.x - 120 / view.z, point.y);
+        ctx.lineTo(point.x + 120 / view.z, point.y);
+        ctx.moveTo(point.x, point.y - 120 / view.z);
+        ctx.lineTo(point.x, point.y + 120 / view.z);
+      }
+      ctx.stroke();
+      ctx.restore();
+    }
+  }
+
+  function computeWarnings() {
+    const geometry = activeGeometry();
+    const warningMap = new Map();
+    warningItemIds = new Set();
+    if (!scale()) return [];
+    const centimetreItems = items().map(itemToCm);
+    for (const item of centimetreItems) {
+      const warnings = Geometry.analyzePlacement(item, centimetreItems, geometry, {
+        clearance: item.id === selected ? clearanceDistance() : 0
+      });
+      for (const warning of warnings) {
+        warningItemIds.add(item.id);
+        if (warning.id) warningItemIds.add(warning.id);
+        const key = warning.type === 'furniture'
+          ? `furniture-${[item.id, warning.id].sort().join('-')}`
+          : `${warning.type}-${item.id}-${warning.id || ''}-${warning.distance || ''}`;
+        const text = {
+          furniture: `A(z) „${item.name}” egy másik bútorral átfedésben van.`,
+          boundary: `A(z) „${item.name}” kilóg az aktív szobahatáron.`,
+          door: `A(z) „${item.name}” ajtónyitási területet metsz.`,
+          clearance: `A(z) „${item.name}” ${warning.distance} cm-es segédsávja bútort metsz.`
+        }[warning.type];
+        if (text) warningMap.set(key, text);
+      }
+    }
+    return [...warningMap.values()];
+  }
+
+  function renderWarnings(warnings) {
+    const container = $('warnings');
+    container.hidden = warnings.length === 0;
+    container.innerHTML = warnings.slice(0, 4).map(text => `<div>⚠ ${text}</div>`).join('');
+    if (warnings.length > 4) container.innerHTML += `<small>+${warnings.length - 4} további figyelmeztetés</small>`;
+  }
+
   function drawItem(item) {
     const size = furnitureSize(item);
     ctx.save();
@@ -280,6 +477,11 @@
       ctx.lineWidth = 2 / view.z;
       ctx.strokeRect(-3 / view.z, -3 / view.z, size.w + 6 / view.z, size.h + 6 / view.z);
       ctx.setLineDash([]);
+    }
+    if (warningItemIds.has(item.id)) {
+      ctx.strokeStyle = '#c6563f';
+      ctx.lineWidth = 3 / view.z;
+      ctx.strokeRect(-5 / view.z, -5 / view.z, size.w + 10 / view.z, size.h + 10 / view.z);
     }
     ctx.restore();
   }
@@ -301,6 +503,8 @@
     ctx.save();
     ctx.translate(view.x, view.y);
     ctx.scale(view.z, view.z);
+    const warnings = computeWarnings();
+    renderWarnings(warnings);
     if (image) {
       ctx.drawImage(image, 0, 0);
       ctx.strokeStyle = '#cad8c8';
@@ -320,13 +524,32 @@
       ctx.fillText(reference.label, reference.x1, reference.y1 - 12 / view.z);
       ctx.restore();
     }
+    drawRoomGeometry();
     items().forEach(drawItem);
+    drawClearanceGuide();
+    drawSnapGuides();
+    if (lastMeasurement) {
+      ctx.save();
+      ctx.strokeStyle = '#32816c';
+      ctx.lineWidth = 2 / view.z;
+      ctx.setLineDash([8 / view.z, 4 / view.z]);
+      ctx.beginPath();
+      ctx.moveTo(lastMeasurement.start.x, lastMeasurement.start.y);
+      ctx.lineTo(lastMeasurement.end.x, lastMeasurement.end.y);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      drawDimensionLabel(lastMeasurement.start, lastMeasurement.end, `${lastMeasurement.cm.toFixed(1)} cm`, '#276b59');
+      ctx.restore();
+    }
     if (lineStart && lineEnd) {
       ctx.strokeStyle = mode === 'calibrate' ? '#e25f48' : '#32816c';
       ctx.lineWidth = 3 / view.z;
       ctx.setLineDash([10 / view.z, 5 / view.z]);
       ctx.beginPath(); ctx.moveTo(lineStart.x, lineStart.y); ctx.lineTo(lineEnd.x, lineEnd.y); ctx.stroke();
       ctx.setLineDash([]);
+      if (mode === 'measure' && scale()) {
+        drawDimensionLabel(lineStart, lineEnd, `${(Math.hypot(lineEnd.x - lineStart.x, lineEnd.y - lineStart.y) / scale()).toFixed(1)} cm`, '#276b59');
+      }
     }
     ctx.restore();
     $('zoomLabel').textContent = `${Math.round(view.z * 100)}%`;
@@ -369,17 +592,51 @@
   function setMode(value) {
     mode = value;
     lineStart = lineEnd = null;
-    ['select', 'calibrate', 'measure', 'pan'].forEach(name => {
-      $(`mode${name[0].toUpperCase()}${name.slice(1)}`).classList.toggle('selected', value === name);
-    });
-    $('hintMode').textContent = {
-      select: 'Húzd a bútorokat a helyükre.',
-      calibrate: 'Kattints egy ismert hosszúság két végpontjára.',
-      measure: 'Kattints két pontra a távolság méréséhez.',
-      pan: 'Húzd az alaprajzot a nézet mozgatásához.'
-    }[value];
-    canvas.style.cursor = value === 'pan' ? 'grab' : ['calibrate', 'measure'].includes(value) ? 'crosshair' : 'default';
+    snapGuides = [];
+    if (value !== 'walls') selectedVertex = null;
+    if (value !== 'openings') { selectedArchitecture = null; openingTool = null; }
+    const buttons = { select: 'modeSelect', walls: 'modeWalls', openings: 'modeOpenings', measure: 'modeMeasure', calibrate: 'modeCalibrate', pan: 'modePan' };
+    Object.entries(buttons).forEach(([name, id]) => $(id).classList.toggle('selected', value === name));
+    const descriptions = {
+      select: ['Berendezés', 'Húzd a bútorokat; az igazítás és az ütközésjelzés nem akadályozza a szabad elhelyezést.'],
+      walls: ['Falak és méretek', 'Kattints sorban a falpontokra. A kép alapján számolt ≈ hosszt a jobb oldalon írd felül a biztosan ismert centiméterértékkel.'],
+      openings: ['Nyílászárók', 'Válassz ajtót, ablakot vagy radiátort, majd kattints a megfelelő fal közelébe.'],
+      measure: ['Mérés', 'Kattints két pontra. A mérés a kalibrált képet követi, ezért torz rajzon csak tájékoztató.'],
+      calibrate: ['Képi kalibrálás', 'Jelölj ki egy ismert képi szakaszt, majd add meg valós hosszát centiméterben.'],
+      pan: ['Nézet mozgatása', 'Húzd az alaprajzot a nézet mozgatásához.']
+    };
+    $('modeTitle').textContent = descriptions[value][0];
+    $('modeHelp').textContent = descriptions[value][1];
+    $('hintMode').textContent = descriptions[value][1];
+    $('geometryTools').hidden = !['walls', 'openings'].includes(value);
+    $('openingTools').hidden = value !== 'openings';
+    $('furnishTools').hidden = value !== 'select';
+    $('measureTools').hidden = value !== 'measure';
+    canvas.style.cursor = value === 'pan' ? 'grab' : ['calibrate', 'measure', 'walls', 'openings'].includes(value) ? 'crosshair' : 'default';
+    renderGeometryControls();
+    renderProps();
     draw();
+  }
+
+  function renderGeometryControls() {
+    const select = $('geometrySelect');
+    select.innerHTML = '';
+    if (!geometries().length) {
+      const option = document.createElement('option');
+      option.textContent = 'Nincs szobageometria';
+      option.value = '';
+      select.append(option);
+    } else {
+      for (const geometry of geometries()) {
+        const option = document.createElement('option');
+        option.value = geometry.id;
+        option.textContent = `${geometry.name}${geometry.closed ? ' · zárt' : ' · nyitott'}`;
+        select.append(option);
+      }
+      select.value = room().activeGeometryId || '';
+    }
+    $('closeGeometry').disabled = !activeGeometry() || activeGeometry().closed || activeGeometry().vertices.length < 3;
+    $('deleteGeometry').disabled = !activeGeometry();
   }
 
   function renderRooms() {
@@ -566,10 +823,163 @@
     select.value = room().active;
   }
 
+  function propertyField(container, label, value, onChange, options = {}) {
+    const box = document.createElement('div');
+    box.className = 'field';
+    const fieldLabel = document.createElement('label');
+    fieldLabel.textContent = label;
+    const input = options.values ? document.createElement('select') : document.createElement('input');
+    if (options.values) {
+      for (const [optionValue, optionLabel] of options.values) {
+        const option = document.createElement('option');
+        option.value = optionValue;
+        option.textContent = optionLabel;
+        input.append(option);
+      }
+    } else {
+      input.type = options.type || 'number';
+      if (input.type === 'number') {
+        input.min = options.min ?? '0.1';
+        input.max = options.max ?? '5000';
+        input.step = options.step || '0.1';
+      }
+    }
+    input.value = value ?? '';
+    input.addEventListener('change', () => {
+      const next = input.tagName === 'SELECT' || input.type === 'text' ? input.value.trim() : Number(input.value);
+      if ((input.type === 'number' && (!Number.isFinite(next) || (!options.allowZero && next <= 0))) || (input.type === 'text' && !next)) {
+        input.value = value ?? '';
+        return;
+      }
+      onChange(next);
+    });
+    box.append(fieldLabel, input);
+    container.append(box);
+    return input;
+  }
+
+  function renderGeometryProps(container) {
+    const geometry = activeGeometry();
+    if (!geometry) {
+      container.innerHTML = '<div class="property-empty"><strong>Nincs aktív szobageometria</strong><p class="hint">Hozz létre egy geometriát, majd kattints sorban a falak végpontjaira.</p></div>';
+      return;
+    }
+    const summary = document.createElement('div');
+    summary.className = 'geometry-summary';
+    summary.innerHTML = `<strong></strong><small>${geometry.vertices.length} falpont · ${geometry.closed ? 'zárt poligon' : 'nyitott vonal'}</small>`;
+    summary.querySelector('strong').textContent = geometry.name;
+    container.append(summary);
+    propertyField(container, 'Geometria neve', geometry.name, value => {
+      geometry.name = value;
+      save(); renderGeometryControls(); renderProps();
+    }, { type: 'text' });
+    if (selectedVertex !== null && geometry.vertices[selectedVertex]) {
+      const vertex = geometry.vertices[selectedVertex];
+      const title = document.createElement('h3');
+      title.textContent = `${selectedVertex + 1}. falpont`;
+      container.append(title);
+      for (const axis of ['x', 'y']) {
+        propertyField(container, `${axis.toUpperCase()} koordináta (cm)`, vertex[axis].toFixed(1), value => {
+          vertex[axis] = value;
+          const previousWall = (selectedVertex - 1 + geometry.vertices.length) % geometry.vertices.length;
+          geometry.confirmedWalls[previousWall] = false;
+          geometry.confirmedWalls[selectedVertex] = false;
+          save(); renderProps(); draw();
+        }, { allowZero: true });
+      }
+    }
+    const heading = document.createElement('h3');
+    heading.textContent = 'Falhosszak';
+    container.append(heading);
+    const count = geometry.closed ? geometry.vertices.length : Math.max(0, geometry.vertices.length - 1);
+    if (!count) {
+      const hint = document.createElement('p');
+      hint.className = 'hint';
+      hint.textContent = 'Kattints a tervre az első két falpont megadásához.';
+      container.append(hint);
+    }
+    for (let index = 0; index < count; index += 1) {
+      const next = (index + 1) % geometry.vertices.length;
+      const measured = Geometry.distance(geometry.vertices[index], geometry.vertices[next]);
+      const row = document.createElement('div');
+      row.className = 'wall-length-row';
+      const label = document.createElement('label');
+      label.textContent = `${index + 1}. fal ${geometry.confirmedWalls[index] ? '✓ pontos' : '≈ kép alapján'}`;
+      const input = document.createElement('input');
+      input.type = 'number'; input.min = '0.1'; input.max = '5000'; input.step = '0.1'; input.value = measured.toFixed(1);
+      input.addEventListener('change', () => {
+        try {
+          geometry.vertices = Geometry.setWallLength(geometry.vertices, index, input.value, geometry.closed);
+          geometry.confirmedWalls[index] = true;
+          if (geometry.closed || index + 1 < geometry.vertices.length - 1) geometry.confirmedWalls[next] = false;
+          save(); renderProps(); draw();
+        } catch (error) {
+          flash(error.message);
+          input.value = measured.toFixed(1);
+        }
+      });
+      row.append(label, input);
+      container.append(row);
+    }
+    const note = document.createElement('p');
+    note.className = 'hint geometry-note';
+    note.textContent = '≈ = a kalibrált képből számolt, nem megerősített hossz. A pontos érték beírása elmozdítja a szakasz végpontját, így a torz rajz kézzel korrigálható.';
+    container.append(note);
+  }
+
+  function renderArchitectureProps(container) {
+    const geometry = activeGeometry();
+    const object = geometry?.objects?.find(value => value.id === selectedArchitecture?.id);
+    if (!object) {
+      container.innerHTML = '<p class="hint">Válassz egy eszközt fent, majd kattints egy fal közelébe; vagy kattints egy meglévő nyílászáróra.</p>';
+      return;
+    }
+    const names = { door: 'Ajtó', window: 'Ablak', radiator: 'Radiátor' };
+    const summary = document.createElement('div');
+    summary.className = `architecture-summary ${object.type}`;
+    summary.innerHTML = `<strong>${names[object.type]}</strong><small>${object.wallIndex + 1}. falon</small>`;
+    container.append(summary);
+    propertyField(container, 'Megnevezés', object.name || names[object.type], value => { object.name = value; save(); renderProps(); draw(); }, { type: 'text' });
+    propertyField(container, 'Szélesség (cm)', object.width, value => {
+      const wall = Geometry.wallFrame(geometry.vertices, object.wallIndex, object.offset);
+      if (!wall || value > wall.length) {
+        flash('Az elem szélessége nem lehet nagyobb a falszakasznál.');
+        renderProps();
+        return;
+      }
+      object.width = value;
+      object.offset = clamp(object.offset, value / 2, Math.max(value / 2, wall.length - value / 2));
+      save(); renderProps(); draw();
+    });
+    propertyField(container, 'Pozíció a fal kezdetétől (cm)', object.offset, value => {
+      const wall = Geometry.wallFrame(geometry.vertices, object.wallIndex, value);
+      object.offset = wall ? clamp(value, object.width / 2, Math.max(object.width / 2, wall.length - object.width / 2)) : value;
+      save(); renderProps(); draw();
+    });
+    if (object.type === 'door') {
+      propertyField(container, 'Zsanér', object.hinge, value => { object.hinge = value; save(); draw(); }, { values: [['start', 'Bal / falszakasz eleje'], ['end', 'Jobb / falszakasz vége']] });
+      propertyField(container, 'Nyitási irány', object.swing, value => { object.swing = value; save(); draw(); }, { values: [['in', 'A szoba belseje felé'], ['out', 'A szobából kifelé']] });
+    } else {
+      if (object.type === 'radiator') propertyField(container, 'Mélység (cm)', object.depth, value => { object.depth = value; save(); draw(); });
+      propertyField(container, 'Magasság (cm)', object.height, value => { object.height = value; save(); draw(); });
+    }
+    const remove = document.createElement('button');
+    remove.className = 'wide danger';
+    remove.textContent = `${names[object.type]} törlése`;
+    remove.onclick = () => {
+      geometry.objects = geometry.objects.filter(value => value.id !== object.id);
+      selectedArchitecture = null;
+      save(); renderProps(); draw();
+    };
+    container.append(remove);
+  }
+
   function renderProps() {
     const container = $('props');
     const item = items().find(value => value.id === selected);
     container.innerHTML = '';
+    if (mode === 'walls') { renderGeometryProps(container); return; }
+    if (mode === 'openings') { renderArchitectureProps(container); return; }
     if (!item) {
       container.innerHTML = '<p class="hint">Válassz egy bútort a terven, vagy adj hozzá egyet a bal oldali katalógusból.</p>';
       return;
@@ -683,17 +1093,155 @@
     save(); renderProps(); draw();
   }
 
+  async function createGeometry() {
+    if (!scale()) {
+      flash('Előbb kalibráld az alaprajzot egy ismert szakasz alapján.');
+      setMode('calibrate');
+      return;
+    }
+    const answer = await ask('Új szobageometria', 'A falpontokat centiméterben tároljuk. A képi aránytalanságokat ezután a pontos falhosszakkal javíthatod.', [
+      { key: 'name', label: 'Geometria neve', value: `Geometria ${geometries().length + 1}` }
+    ]);
+    if (!answer?.name?.trim()) return;
+    const geometry = { id: idFactory(), name: answer.name.trim(), vertices: [], closed: false, confirmedWalls: [], objects: [] };
+    geometries().push(geometry);
+    room().activeGeometryId = geometry.id;
+    selectedVertex = null;
+    selectedArchitecture = null;
+    save(); renderGeometryControls(); renderProps(); draw();
+    flash('Kattints sorban a falak végpontjaira. A poligon legalább három ponttal zárható.');
+  }
+
+  function closeActiveGeometry() {
+    const geometry = activeGeometry();
+    if (!geometry || geometry.closed || geometry.vertices.length < 3) return;
+    if (Geometry.polygonSelfIntersects(geometry.vertices, true)) {
+      flash('A poligon önmetsző, ezért nem zárható. Mozgasd vagy töröld a hibás falpontot.');
+      return;
+    }
+    geometry.closed = true;
+    while (geometry.confirmedWalls.length < geometry.vertices.length) geometry.confirmedWalls.push(false);
+    save(); renderGeometryControls(); renderProps(); draw();
+    flash('A szobapoligon bezárva. A ≈ jelű falhosszakat ellenőrizd és írd át a pontos értékre.');
+  }
+
+  function hitVertexAt(worldPoint) {
+    const geometry = activeGeometry();
+    if (!geometry || !scale()) return -1;
+    const threshold = 12 / view.z;
+    let best = -1;
+    let bestDistance = Infinity;
+    geometry.vertices.forEach((vertex, index) => {
+      const point = pointToWorld(vertex);
+      const value = Math.hypot(worldPoint.x - point.x, worldPoint.y - point.y);
+      if (value <= threshold && value < bestDistance) { best = index; bestDistance = value; }
+    });
+    return best;
+  }
+
+  function hitArchitectureAt(worldPoint) {
+    const geometry = activeGeometry();
+    if (!geometry || !scale()) return null;
+    const point = pointToCm(worldPoint);
+    const threshold = 10 / (view.z * scale());
+    let best = null;
+    for (const object of geometry.objects || []) {
+      let value = Infinity;
+      if (object.type === 'radiator') {
+        const polygon = Geometry.radiatorPolygon(object, geometry.vertices);
+        if (Geometry.pointInPolygon(point, polygon, true)) value = 0;
+        else for (const [a, b] of Geometry.polygonEdges(polygon)) value = Math.min(value, Geometry.nearestPointOnSegment(point, a, b).distance);
+      } else {
+        const opening = Geometry.openingSegment(object, geometry.vertices);
+        if (opening) value = Geometry.nearestPointOnSegment(point, opening.a, opening.b).distance;
+      }
+      if (value <= threshold && (!best || value < best.distance)) best = { id: object.id, type: object.type, distance: value };
+    }
+    return best;
+  }
+
+  async function addArchitectureAt(worldPoint) {
+    const geometry = activeGeometry();
+    if (!geometry || geometry.vertices.length < 2 || !openingTool) {
+      flash('Válassz aktív geometriát és egy elhelyezendő építészeti elemet.');
+      return;
+    }
+    if ((openingTool === 'door' || openingTool === 'radiator') && !geometry.closed) {
+      flash('Ajtónyitási irányhoz és radiátorhoz előbb zárd be a szobapoligont.');
+      return;
+    }
+    const nearest = Geometry.nearestWall(pointToCm(worldPoint), geometry.vertices, geometry.closed);
+    const threshold = 24 / (view.z * scale());
+    if (!nearest || nearest.distance > threshold) {
+      flash('Kattints közelebb a kiválasztott falhoz.');
+      return;
+    }
+    const definitions = {
+      door: {
+        title: 'Ajtó elhelyezése', fields: [
+          { key: 'name', label: 'Megnevezés', value: 'Ajtó' },
+          { key: 'width', label: 'Ajtó szélessége (cm)', value: '90', type: 'number' },
+          { key: 'hinge', label: 'Zsanér helye', value: 'start', options: [['start', 'Bal / falszakasz eleje'], ['end', 'Jobb / falszakasz vége']] },
+          { key: 'swing', label: 'Nyitási irány', value: 'in', options: [['in', 'A szoba belseje felé'], ['out', 'A szobából kifelé']] }
+        ]
+      },
+      window: {
+        title: 'Ablak elhelyezése', fields: [
+          { key: 'name', label: 'Megnevezés', value: 'Ablak' },
+          { key: 'width', label: 'Ablak szélessége (cm)', value: '120', type: 'number' },
+          { key: 'height', label: 'Ablak magassága (cm)', value: '120', type: 'number' }
+        ]
+      },
+      radiator: {
+        title: 'Radiátor elhelyezése', fields: [
+          { key: 'name', label: 'Megnevezés', value: 'Radiátor' },
+          { key: 'width', label: 'Szélesség (cm)', value: '80', type: 'number' },
+          { key: 'depth', label: 'Mélység (cm)', value: '12', type: 'number' },
+          { key: 'height', label: 'Magasság (cm)', value: '60', type: 'number' }
+        ]
+      }
+    };
+    const definition = definitions[openingTool];
+    const answer = await ask(definition.title, `${nearest.wallIndex + 1}. fal · minden méret valós centiméterben`, definition.fields);
+    if (!answer) return;
+    const width = Number(answer.width);
+    if (!Number.isFinite(width) || width <= 0 || width > nearest.length) {
+      flash('Az elem szélességének pozitívnak és a falnál rövidebbnek kell lennie.');
+      return;
+    }
+    const object = {
+      id: idFactory(), type: openingTool, name: answer.name.trim() || definition.title,
+      wallIndex: nearest.wallIndex, offset: clamp(nearest.offset, width / 2, nearest.length - width / 2), width
+    };
+    if (openingTool === 'door') Object.assign(object, { hinge: answer.hinge, swing: answer.swing });
+    if (openingTool === 'window') object.height = Number(answer.height);
+    if (openingTool === 'radiator') Object.assign(object, { depth: Number(answer.depth), height: Number(answer.height) });
+    if ([object.height, object.depth].filter(value => value !== undefined).some(value => !Number.isFinite(value) || value <= 0)) {
+      flash('Minden megadott méretnek pozitív számnak kell lennie.');
+      return;
+    }
+    geometry.objects.push(object);
+    selectedArchitecture = { id: object.id, type: object.type };
+    openingTool = null;
+    document.querySelectorAll('#openingTools button').forEach(button => button.classList.remove('selected'));
+    save(); renderProps(); draw();
+  }
+
   function openRoom(id, recordChange = true) {
     if (!data.rooms[id]) id = 'room1';
     roomId = id;
     data.currentRoom = id;
     selected = null;
+    selectedVertex = null;
+    selectedArchitecture = null;
+    snapGuides = [];
     lineStart = lineEnd = null;
     image = new Image();
     image.onload = () => {
       fit();
       renderRooms();
       renderVariants();
+      renderGeometryControls();
       renderProps();
       save(recordChange);
       flash(`Megnyitva: ${room().name} · Ellenőrizd a méretarányt!`, 6500);
@@ -715,10 +1263,17 @@
         box.className = 'field';
         const label = document.createElement('label');
         label.textContent = definition.label;
-        const input = document.createElement('input');
+        const input = definition.options ? document.createElement('select') : document.createElement('input');
         input.name = definition.key;
+        if (definition.options) {
+          for (const [value, text] of definition.options) {
+            const option = document.createElement('option');
+            option.value = value;
+            option.textContent = text;
+            input.append(option);
+          }
+        } else input.type = definition.type || 'text';
         input.value = definition.value ?? '';
-        input.type = definition.type || 'text';
         input.required = definition.required !== false;
         if (input.type === 'number') {
           input.min = definition.min ?? '0.01';
@@ -831,6 +1386,39 @@
       drag = { type: 'pan', start: point, view: { ...view } };
       return;
     }
+    if (mode === 'walls') {
+      if (!scale()) { flash('Előbb kalibráld az alaprajzot.'); setMode('calibrate'); return; }
+      const geometry = activeGeometry();
+      if (!geometry) { flash('Hozz létre egy szobageometriát az „Új geometria” gombbal.'); return; }
+      const vertexIndex = hitVertexAt(location);
+      if (vertexIndex >= 0) {
+        if (!geometry.closed && vertexIndex === 0 && geometry.vertices.length >= 3) {
+          closeActiveGeometry();
+          return;
+        }
+        selectedVertex = vertexIndex;
+        selectedArchitecture = null;
+        drag = { type: 'vertex', index: vertexIndex };
+        renderProps(); draw();
+        return;
+      }
+      if (geometry.closed) { selectedVertex = null; renderProps(); draw(); flash('A zárt geometrián a meglévő falpontok húzhatók.'); return; }
+      const pointCm = pointToCm(location);
+      geometry.vertices.push({ id: idFactory(), x: pointCm.x, y: pointCm.y });
+      if (geometry.vertices.length > 1) geometry.confirmedWalls.push(false);
+      selectedVertex = geometry.vertices.length - 1;
+      save(); renderGeometryControls(); renderProps(); draw();
+      return;
+    }
+    if (mode === 'openings') {
+      const architecture = hitArchitectureAt(location);
+      if (architecture) {
+        selectedArchitecture = architecture;
+        renderProps(); draw();
+      } else if (openingTool) addArchitectureAt(location);
+      else flash('Válassz fent ajtót, ablakot vagy radiátort, majd kattints egy falra.');
+      return;
+    }
     if (mode === 'calibrate' || mode === 'measure') {
       if (!lineStart) {
         lineStart = location;
@@ -860,7 +1448,10 @@
             draw();
           });
         } else {
-          if (scale()) flash(`Mért távolság: ${(length / scale()).toFixed(1)} cm`, 8000);
+          if (scale()) {
+            lastMeasurement = { start: { ...lineStart }, end: { ...lineEnd }, cm: length / scale() };
+            flash(`Mért távolság: ${(length / scale()).toFixed(1)} cm`, 8000);
+          }
           else flash('Előbb kalibráld az alaprajz méretarányát.');
           lineStart = lineEnd = null;
         }
@@ -887,6 +1478,36 @@
       if (item) {
         item.x = drag.x + location.x - drag.from.x;
         item.y = drag.y + location.y - drag.from.y;
+        snapGuides = [];
+        if (snapEnabled && scale()) {
+          const itemCm = itemToCm(item);
+          const geometry = activeGeometry();
+          const snapped = Geometry.snapFurniture(itemCm, {
+            threshold: 10 / (view.z * scale()),
+            walls: $('snapWalls').checked && Boolean(geometry),
+            roomVertices: geometry?.vertices,
+            roomClosed: geometry?.closed,
+            furniture: $('snapFurniture').checked,
+            otherItems: items().filter(value => value.id !== item.id).map(itemToCm),
+            grid: $('snapGrid').checked,
+            gridSize: 5
+          });
+          item.x = snapped.x * scale();
+          item.y = snapped.y * scale();
+          snapGuides = snapped.guides;
+        }
+        draw();
+      }
+    } else if (drag?.type === 'vertex') {
+      const geometry = activeGeometry();
+      const vertex = geometry?.vertices?.[drag.index];
+      if (vertex && scale()) {
+        const pointCm = pointToCm(location);
+        vertex.x = pointCm.x;
+        vertex.y = pointCm.y;
+        const previousWall = (drag.index - 1 + geometry.vertices.length) % geometry.vertices.length;
+        geometry.confirmedWalls[previousWall] = false;
+        geometry.confirmedWalls[drag.index] = false;
         draw();
       }
     } else if (lineStart && !drag) {
@@ -898,13 +1519,11 @@
   function endDrag() {
     if (drag?.type === 'furniture') {
       const item = items().find(value => value.id === drag.id);
-      if (item && snapEnabled) {
-        const unit = (scale() || 2) * 5;
-        item.x = Math.round(item.x / unit) * unit;
-        item.y = Math.round(item.y / unit) * unit;
-      }
       save(); renderProps(); draw();
+    } else if (drag?.type === 'vertex') {
+      save(); renderGeometryControls(); renderProps(); draw();
     }
+    snapGuides = [];
     drag = null;
   }
 
@@ -940,13 +1559,25 @@
       return;
     }
     if (event.code === 'Space' && !typing) { event.preventDefault(); spaceDown = true; }
-    if (event.key === 'Escape') { selected = null; lineStart = lineEnd = null; renderProps(); draw(); }
-    if (!typing && (event.key === 'Delete' || event.key === 'Backspace')) removeSelected();
+    if (event.key === 'Escape') {
+      selected = null; selectedVertex = null; selectedArchitecture = null; openingTool = null;
+      snapGuides = []; lineStart = lineEnd = null; lastMeasurement = null;
+      document.querySelectorAll('#openingTools button').forEach(button => button.classList.remove('selected'));
+      renderProps(); draw();
+    }
+    if (!typing && (event.key === 'Delete' || event.key === 'Backspace')) {
+      if (mode === 'openings' && selectedArchitecture) {
+        const geometry = activeGeometry();
+        geometry.objects = geometry.objects.filter(value => value.id !== selectedArchitecture.id);
+        selectedArchitecture = null;
+        save(); renderProps(); draw();
+      } else if (mode === 'select') removeSelected();
+    }
   });
   window.addEventListener('keyup', event => { if (event.code === 'Space') spaceDown = false; });
   window.addEventListener('resize', draw);
 
-  ['select', 'calibrate', 'measure', 'pan'].forEach(name => {
+  ['select', 'walls', 'openings', 'calibrate', 'measure', 'pan'].forEach(name => {
     $(`mode${name[0].toUpperCase()}${name.slice(1)}`).onclick = () => setMode(name);
   });
   $('zoomOut').onclick = () => zoom(1 / 1.25);
@@ -960,8 +1591,37 @@
     snapEnabled = !snapEnabled;
     $('snap').classList.toggle('selected', snapEnabled);
     $('snap').setAttribute('aria-pressed', String(snapEnabled));
-    $('snap').textContent = `⊞ 5 cm rács: ${snapEnabled ? 'be' : 'ki'}`;
+    $('snap').textContent = `⊞ Igazítás: ${snapEnabled ? 'be' : 'ki'}`;
   };
+
+  $('geometrySelect').onchange = event => {
+    room().activeGeometryId = event.target.value || null;
+    selectedVertex = null;
+    selectedArchitecture = null;
+    save(); renderGeometryControls(); renderProps(); draw();
+  };
+  $('newGeometry').onclick = createGeometry;
+  $('closeGeometry').onclick = closeActiveGeometry;
+  $('deleteGeometry').onclick = () => {
+    const geometry = activeGeometry();
+    if (!geometry || !confirm(`Biztosan törlöd ezt a szobageometriát és a hozzá tartozó nyílászárókat?\n\n${geometry.name}`)) return;
+    room().geometries = geometries().filter(value => value.id !== geometry.id);
+    room().activeGeometryId = room().geometries[0]?.id || null;
+    selectedVertex = null;
+    selectedArchitecture = null;
+    save(); renderGeometryControls(); renderProps(); draw();
+  };
+  const openingLabels = { door: 'Ajtó', window: 'Ablak', radiator: 'Radiátor' };
+  for (const [type, id] of [['door', 'addDoor'], ['window', 'addWindow'], ['radiator', 'addRadiator']]) {
+    $(id).onclick = () => {
+      openingTool = openingTool === type ? null : type;
+      document.querySelectorAll('#openingTools button').forEach(button => button.classList.toggle('selected', button.id === id && openingTool === type));
+      flash(openingTool ? `${openingLabels[type]}: kattints a kívánt fal közelébe.` : 'Elhelyezés megszakítva.');
+    };
+  }
+  for (const [id, other] of [['clearance70', 'clearance80'], ['clearance80', 'clearance70']]) {
+    $(id).onchange = () => { if ($(id).checked) $(other).checked = false; draw(); };
+  }
 
   $('variant').onchange = event => {
     room().active = event.target.value;
@@ -1038,7 +1698,7 @@
         const id = `custom-${idFactory()}`;
         const custom = { id, name: answer.name.trim(), url: String(reader.result), pxPerCm: null, reference: null, isCustom: true };
         data.customPlans.push(custom);
-        data.rooms[id] = { name: custom.name, pxPerCm: null, active: 'Alap', variants: { Alap: emptyVariant() } };
+        data.rooms[id] = { name: custom.name, pxPerCm: null, active: 'Alap', variants: { Alap: emptyVariant() }, geometries: [], activeGeometryId: null };
         if (!save()) {
           data.customPlans = data.customPlans.filter(value => value.id !== id);
           delete data.rooms[id];
@@ -1093,7 +1753,7 @@
   $('exportJSON').onclick = () => {
     const exportData = structuredClone(data);
     exportData.favoriteProducts = favorites;
-    exportData.exportedBy = 'Zuglak Studio 1.4';
+    exportData.exportedBy = 'Zuglak Studio 1.5';
     download('zuglak-tervek.json', new Blob([JSON.stringify(exportData, null, 2)], { type: 'application/json' }));
   };
 
@@ -1105,7 +1765,7 @@
       if (!Core.isValidPlanData(imported, ORIGINAL_PLANS.map(value => value.id))) throw new Error('Hibás fájl');
       if (!confirm('Betöltjük a fájlt? Ez felülírja a böngésző jelenlegi terveit.')) return;
       const importedFavorites = imported.favoriteProducts;
-      const nextData = structuredClone(imported);
+      const nextData = Core.migratePlanData(imported, ORIGINAL_PLANS.map(value => value.id));
       delete nextData.favoriteProducts;
       delete nextData.exportedBy;
       nextData.customPlans = Array.isArray(nextData.customPlans) ? nextData.customPlans : [];
@@ -1152,16 +1812,26 @@
     output.height = image.height;
     const previousContext = ctx;
     const previousSelected = selected;
+    const previousSelectedVertex = selectedVertex;
+    const previousSelectedArchitecture = selectedArchitecture;
+    const previousWarningItemIds = warningItemIds;
     const previousZoom = view.z;
     try {
       ctx = output.getContext('2d');
       ctx.drawImage(image, 0, 0);
       selected = null;
+      selectedVertex = null;
+      selectedArchitecture = null;
+      warningItemIds = new Set();
       view.z = 1;
+      drawRoomGeometry();
       items().forEach(drawItem);
     } finally {
       ctx = previousContext;
       selected = previousSelected;
+      selectedVertex = previousSelectedVertex;
+      selectedArchitecture = previousSelectedArchitecture;
+      warningItemIds = previousWarningItemIds;
       view.z = previousZoom;
     }
     output.toBlob(blob => {

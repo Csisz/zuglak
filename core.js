@@ -8,6 +8,8 @@
 
   const PLAN_STORAGE_KEY = 'zuglak-v2';
   const FAVORITES_STORAGE_KEY = 'zuglak-favorites-v1';
+  const LEGACY_BACKUP_KEY = 'zuglak-v2-backup-v1';
+  const CURRENT_PLAN_VERSION = 2;
 
   function normalizeProductId(value) {
     const digits = String(value || '').replace(/\D/g, '');
@@ -156,16 +158,45 @@
 
   function isValidPlanData(value, requiredRoomIds) {
     return Boolean(
-      value && value.version === 1 && value.rooms &&
+      value && [1, CURRENT_PLAN_VERSION].includes(value.version) && value.rooms &&
       requiredRoomIds.every(id => value.rooms[id] && value.rooms[id].variants)
     );
   }
 
+  function migratePlanData(value, requiredRoomIds = []) {
+    if (!isValidPlanData(value, requiredRoomIds)) throw new TypeError('Nem érvényes Zuglak tervadat.');
+    const migrated = JSON.parse(JSON.stringify(value));
+    migrated.version = CURRENT_PLAN_VERSION;
+    migrated.customPlans = Array.isArray(migrated.customPlans) ? migrated.customPlans : [];
+    for (const room of Object.values(migrated.rooms)) {
+      room.geometries = Array.isArray(room.geometries) ? room.geometries : [];
+      room.activeGeometryId = room.geometries.some(geometry => geometry.id === room.activeGeometryId)
+        ? room.activeGeometryId
+        : room.geometries[0]?.id || null;
+      for (const geometry of room.geometries) {
+        geometry.name = String(geometry.name || 'Szobageometria');
+        geometry.vertices = Array.isArray(geometry.vertices) ? geometry.vertices : [];
+        geometry.closed = Boolean(geometry.closed && geometry.vertices.length >= 3);
+        geometry.confirmedWalls = Array.isArray(geometry.confirmedWalls) ? geometry.confirmedWalls : [];
+        geometry.objects = Array.isArray(geometry.objects) ? geometry.objects : [];
+      }
+    }
+    return migrated;
+  }
+
   function loadPlan(storage, defaultFactory, requiredRoomIds) {
-    const fallback = defaultFactory();
+    const fallbackValue = defaultFactory();
+    const fallback = isValidPlanData(fallbackValue, requiredRoomIds)
+      ? migratePlanData(fallbackValue, requiredRoomIds)
+      : fallbackValue;
     try {
-      const parsed = JSON.parse(storage.getItem(PLAN_STORAGE_KEY) || 'null');
-      return isValidPlanData(parsed, requiredRoomIds) ? parsed : fallback;
+      const serialized = storage.getItem(PLAN_STORAGE_KEY);
+      const parsed = JSON.parse(serialized || 'null');
+      if (!isValidPlanData(parsed, requiredRoomIds)) return fallback;
+      if (parsed.version === 1 && serialized && !storage.getItem(LEGACY_BACKUP_KEY)) {
+        try { storage.setItem(LEGACY_BACKUP_KEY, serialized); } catch { /* A full quota must not hide readable user data. */ }
+      }
+      return migratePlanData(parsed, requiredRoomIds);
     } catch {
       return fallback;
     }
@@ -174,6 +205,8 @@
   return Object.freeze({
     PLAN_STORAGE_KEY,
     FAVORITES_STORAGE_KEY,
+    LEGACY_BACKUP_KEY,
+    CURRENT_PLAN_VERSION,
     normalizeProductId,
     validateIkeaHungaryUrl,
     parseIkeaProductUrl,
@@ -182,6 +215,7 @@
     loadFavorites,
     saveFavorites,
     isValidPlanData,
+    migratePlanData,
     loadPlan
   });
 });

@@ -15,7 +15,7 @@
       <div><strong>Zuglak</strong><small>STUDIO · Otthonunk tervezője</small></div>
     </div>
     <div class="head-actions">
-      <span class="version-pill">1.4 · IKEA</span>
+      <span class="version-pill">1.5 · SMART</span>
       <span class="privacy-pill">● Privát munkaterület</span>
       <span id="saveState" aria-live="polite">Helyben mentve</span>
       <button id="exportJSON">Terv mentése fájlba</button>
@@ -65,28 +65,57 @@
           <button id="undo" title="Visszavonás (Ctrl+Z)" disabled>↶</button>
           <button id="redo" title="Újra (Ctrl+Y)" disabled>↷</button>
           <span class="tool-separator"></span>
-          <button id="modeSelect" class="selected">↖ Kijelölés</button>
-          <button id="modeCalibrate">⌁ Méretarány</button>
+          <button id="modeSelect" class="selected">▣ Berendezés</button>
+          <button id="modeWalls">⌗ Falak és méretek</button>
+          <button id="modeOpenings">◰ Nyílászárók</button>
           <button id="modeMeasure">↔ Mérés</button>
-          <button id="modePan">✋ Mozgatás</button>
         </div>
         <div class="tools">
+          <button id="modeCalibrate" title="Képi méretarány kalibrálása">⌁ Kalibrálás</button>
+          <button id="modePan" title="Nézet mozgatása">✋</button>
           <button id="zoomOut" title="Kicsinyítés">−</button>
           <span id="zoomLabel">100%</span>
           <button id="zoomIn" title="Nagyítás">＋</button>
           <button id="fit">⤢ Illesztés</button>
-          <button id="snap" title="Mozgatáskor igazítás 5 cm-es lépésekhez" aria-pressed="false">⊞ 5 cm rács: ki</button>
+          <button id="snap" title="Intelligens igazítás mozgatáskor" aria-pressed="false">⊞ Igazítás: ki</button>
           <button id="exportPNG">↓ PNG</button>
         </div>
       </div>
+      <div class="planner-tools" id="plannerTools">
+        <div class="planner-context">
+          <strong id="modeTitle">Berendezés</strong>
+          <span id="modeHelp">Húzd a bútorokat; az igazítás és az ütközésjelzés nem akadályozza a szabad elhelyezést.</span>
+        </div>
+        <div id="geometryTools" class="planner-controls" hidden>
+          <select id="geometrySelect" aria-label="Aktív szobageometria"></select>
+          <button id="newGeometry">＋ Új geometria</button>
+          <button id="closeGeometry">◇ Poligon zárása</button>
+          <button id="deleteGeometry" class="danger">Törlés</button>
+        </div>
+        <div id="openingTools" class="planner-controls" hidden>
+          <button id="addDoor">＋ Ajtó</button>
+          <button id="addWindow">＋ Ablak</button>
+          <button id="addRadiator">＋ Radiátor</button>
+        </div>
+        <div id="furnishTools" class="planner-controls snap-options">
+          <label><input id="snapWalls" type="checkbox" checked> falak</label>
+          <label><input id="snapFurniture" type="checkbox" checked> bútorszélek</label>
+          <label><input id="snapGrid" type="checkbox" checked> 5 cm-es rács</label>
+        </div>
+        <div id="measureTools" class="planner-controls" hidden>
+          <label><input id="clearance70" type="checkbox"> 70 cm-es segédsáv</label>
+          <label><input id="clearance80" type="checkbox"> 80 cm-es segédsáv</label>
+        </div>
+      </div>
       <div class="accuracy-notice">
-        ⚠ A képeken szereplő méretadatok és a rajzolt szakaszok arányai nem mindenhol egyeznek. A bútorok centiméterben méretezhetők, de az elférés ellenőrzéséhez helyszíni mérés javasolt.
+        ⚠ A kalibrált kép sem feltétlenül egyenletesen méretarányos. A falpontokat a képen jelöld, majd az ismert falhosszakat külön, pontos centiméterértékkel javítsd.
         <label><input type="checkbox" id="showReference" checked> Kalibrációs szakasz mutatása</label>
       </div>
       <div class="stage-wrap" id="stageWrap">
         <div class="floating-help">✦ Tipp: kattints balra egy bútorra · Del: törlés · Ctrl+D: másolat · nyilak: finommozgatás</div>
         <canvas id="stage"></canvas>
         <div class="status" id="status" aria-live="polite">Alaprajz betöltése…</div>
+        <div class="warnings" id="warnings" aria-live="polite" hidden></div>
       </div>
       <div class="bottom">
         <span id="scaleInfo">Méretarány nincs beállítva</span>
@@ -159,6 +188,7 @@
   </dialog>
 
   <script src="core.js"></script>
+  <script src="geometry.js"></script>
   <script src="ikea-catalog.js"></script>
   <script src="app.js"></script>
 </body>
