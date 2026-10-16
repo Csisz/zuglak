@@ -1,6 +1,6 @@
-# Zuglak Studio 1.5
+# Zuglak Studio 1.6 — Visual Edition
 
-Privát, helyben futó, magyar nyelvű 2D otthontervező három eredeti alaprajzzal, saját alaprajzokkal, integrált IKEA-bútorkatalógussal és centiméter-alapú intelligens szobatervezővel.
+Privát, helyben futó, magyar nyelvű 2D otthontervező három eredeti alaprajzzal, saját alaprajzokkal, integrált IKEA-bútorkatalógussal és centiméter-alapú intelligens szobatervezővel. A Visual Edition világos, meleg tónusú, desktopon és tableten is használható szerkesztőfelületet ad a változatlan 1.x adatmodell fölé.
 
 ## Indítás
 
@@ -15,6 +15,19 @@ python -m http.server 8765
 ```
 
 Az alkalmazásnak nincs futásidejű külső függősége és internetkapcsolat nélkül is működik. Külső IKEA-termékoldal csak felhasználói kattintásra nyílik meg.
+
+## Újdonságok az 1.6-ban
+
+- Modern, meleg törtfehér felület lebegő, lekerekített eszköztárakkal, hangsúlyos központi vászonnal és tisztább tulajdonságpanellel.
+- Kompaktabb, részletes helyiségkártyák és vizuális bútorkatalógus helyi SVG-előnézetekkel.
+- Új, részletes felülnézeti bútorrajzok: párnázott kanapék és fotelek, ágyneműs ágyak, faerezetes asztalok, székek, gardróbok, tárolók, szőnyegek, növények, lámpák és fürdőszobai elemek.
+- Zárt szobageometrián választható világos tölgy, natúr tölgy, dió vagy semleges padlómegjelenítés. A textúra csak vizuális réteg, a centiméteres koordinátákat nem módosítja.
+- Árnyékolt, többrétegű falrajz; kifinomultabb ajtólap és nyitási ív, üvegezett ablak és tagolt radiátor.
+- Erősebb kijelölési állapot, sarokpontok, finom hover-visszajelzések és jobban olvasható figyelmeztetések.
+- Újratervezett reszponzív tablet-elrendezés. A katalógus és a szerkesztő teljes funkcionalitása érintőkijelzőn is elérhető.
+- A megjelenéshez nincs külső kép-, font- vagy fizetős API-függőség; normál használat teljesen offline marad.
+
+A vizuális réteg nem változtatja meg a bútorok valós szélességét, mélységét, forgatását, ütközési alakzatát vagy a mentési sémát. Az IKEA-termékek továbbra is a hiteles külső befoglaló méretükkel jelennek meg; az illusztráció nem állít termékspecifikus, nem ellenőrzött geometriát.
 
 ## Újdonságok az 1.5-ben
 
@@ -86,5 +99,13 @@ npm test
 npm run check
 npm run test:ui
 ```
+
+Vizuális ellenőrzőképek készítése Windows PowerShellben:
+
+```powershell
+$env:CAPTURE_UI='1'; npm run test:ui
+```
+
+Az elkészült desktop és tablet PNG-k az `artifacts` mappába kerülnek.
 
 Az egységtesztek lefedik a pixel–centiméter átalakítást, pont-poligon vizsgálatot, falszakasz-metszést, forgatott bútorok ütközését, szobahatár-sértést, fal/bútor/rács illesztést, ajtónyitási területet, IKEA-importot, tartós kedvenceket, mentést és verziómigrációt. A headless Chrome/Edge smoke teszt az 1.4 regressziók mellett végigjárja a falgeometriát, pontos méretet, ajtóelhelyezést, mérést, snappinget, ütközési figyelmeztetést és tablet-elrendezést. Egyedi böngészőútvonal a `CHROME_PATH` környezeti változóval adható meg.

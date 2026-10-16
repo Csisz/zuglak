@@ -3,19 +3,19 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="theme-color" content="#244b3e">
-  <title>Zuglak Studio — Otthontervező</title>
+  <meta name="theme-color" content="#f4f1e9">
+  <title>Zuglak Studio 1.6 — Visual Edition</title>
   <link rel="icon" href="assets/favicon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="styles.css">
 </head>
 <body>
   <header>
     <div class="brand">
-      <span class="logo" aria-hidden="true">⌂</span>
-      <div><strong>Zuglak</strong><small>STUDIO · Otthonunk tervezője</small></div>
+      <span class="logo" aria-hidden="true"><svg viewBox="0 0 48 48"><path d="M9 23.5 24 11l15 12.5v14A3.5 3.5 0 0 1 35.5 41h-23A3.5 3.5 0 0 1 9 37.5z"/><path d="M18 41V28h12v13M6 25l18-15 18 15"/></svg></span>
+      <div><strong>Zuglak</strong><small>STUDIO · OTTHONUNK TERVEZŐJE</small></div>
     </div>
     <div class="head-actions">
-      <span class="version-pill">1.5 · SMART</span>
+      <span class="version-pill">1.6 · VISUAL</span>
       <span class="privacy-pill">● Privát munkaterület</span>
       <span id="saveState" aria-live="polite">Helyben mentve</span>
       <button id="exportJSON">Terv mentése fájlba</button>
@@ -27,7 +27,7 @@
 
   <div class="workspace">
     <aside class="left">
-      <h2>Helyiségek</h2>
+      <div class="panel-title"><span class="panel-icon">⌂</span><div><small>PROJEKT</small><h2>Helyiségek</h2></div></div>
       <div id="rooms" class="rooms"></div>
       <div class="room-actions">
         <label class="button secondary wide">＋ Saját alaprajz
@@ -37,8 +37,8 @@
       <p class="hint">A három eredeti rajz és a saját feltöltések külön rendezhetők be. A helyiségek neve átírható.</p>
 
       <div class="divider"></div>
-      <div class="side-heading">
-        <h2>Bútorok és tárgyak</h2>
+      <div class="side-heading panel-title">
+        <span class="panel-icon">◇</span><div><small>KATALÓGUS</small><h2>Bútorok és tárgyak</h2></div>
         <span id="catalogCount"></span>
       </div>
       <div class="catalog-tabs" role="tablist" aria-label="Bútorgyűjtemény">
@@ -62,21 +62,21 @@
     <main>
       <div class="toolbar">
         <div class="tools">
-          <button id="undo" title="Visszavonás (Ctrl+Z)" disabled>↶</button>
-          <button id="redo" title="Újra (Ctrl+Y)" disabled>↷</button>
+          <button id="undo" class="icon-button" title="Visszavonás (Ctrl+Z)" aria-label="Visszavonás" disabled>↶</button>
+          <button id="redo" class="icon-button" title="Újra (Ctrl+Y)" aria-label="Újra" disabled>↷</button>
           <span class="tool-separator"></span>
-          <button id="modeSelect" class="selected">▣ Berendezés</button>
-          <button id="modeWalls">⌗ Falak és méretek</button>
-          <button id="modeOpenings">◰ Nyílászárók</button>
-          <button id="modeMeasure">↔ Mérés</button>
+          <button id="modeSelect" class="selected"><span class="tool-icon">▣</span> Berendezés</button>
+          <button id="modeWalls"><span class="tool-icon">⌗</span> Falak és méretek</button>
+          <button id="modeOpenings"><span class="tool-icon">◰</span> Nyílászárók</button>
+          <button id="modeMeasure"><span class="tool-icon">↔</span> Mérés</button>
         </div>
         <div class="tools">
-          <button id="modeCalibrate" title="Képi méretarány kalibrálása">⌁ Kalibrálás</button>
-          <button id="modePan" title="Nézet mozgatása">✋</button>
-          <button id="zoomOut" title="Kicsinyítés">−</button>
+          <button id="modeCalibrate" title="Képi méretarány kalibrálása"><span class="tool-icon">⌁</span> Skála</button>
+          <button id="modePan" class="icon-button" title="Nézet mozgatása" aria-label="Nézet mozgatása">✋</button>
+          <button id="zoomOut" class="icon-button" title="Kicsinyítés" aria-label="Kicsinyítés">−</button>
           <span id="zoomLabel">100%</span>
-          <button id="zoomIn" title="Nagyítás">＋</button>
-          <button id="fit">⤢ Illesztés</button>
+          <button id="zoomIn" class="icon-button" title="Nagyítás" aria-label="Nagyítás">＋</button>
+          <button id="fit" title="Teljes alaprajz a nézetbe"><span class="tool-icon">⤢</span> Illesztés</button>
           <button id="snap" title="Intelligens igazítás mozgatáskor" aria-pressed="false">⊞ Igazítás: ki</button>
           <button id="exportPNG">↓ PNG</button>
         </div>
@@ -88,6 +88,12 @@
         </div>
         <div id="geometryTools" class="planner-controls" hidden>
           <select id="geometrySelect" aria-label="Aktív szobageometria"></select>
+          <select id="floorMaterial" aria-label="Padlóburkolat">
+            <option value="oak-light">Világos tölgy</option>
+            <option value="oak-natural">Natúr tölgy</option>
+            <option value="walnut">Dió</option>
+            <option value="plain">Egyszínű</option>
+          </select>
           <button id="newGeometry">＋ Új geometria</button>
           <button id="closeGeometry">◇ Poligon zárása</button>
           <button id="deleteGeometry" class="danger">Törlés</button>
@@ -111,7 +117,8 @@
         ⚠ A kalibrált kép sem feltétlenül egyenletesen méretarányos. A falpontokat a képen jelöld, majd az ismert falhosszakat külön, pontos centiméterértékkel javítsd.
         <label><input type="checkbox" id="showReference" checked> Kalibrációs szakasz mutatása</label>
       </div>
-      <div class="stage-wrap" id="stageWrap">
+      <div class="stage-wrap" id="stageWrap" aria-label="Interaktív alaprajz-szerkesztő">
+        <div class="canvas-caption"><span></span><strong id="canvasRoomName">Aktív helyiség</strong></div>
         <div class="floating-help">✦ Tipp: kattints balra egy bútorra · Del: törlés · Ctrl+D: másolat · nyilak: finommozgatás</div>
         <canvas id="stage"></canvas>
         <div class="status" id="status" aria-live="polite">Alaprajz betöltése…</div>
@@ -124,8 +131,8 @@
     </main>
 
     <aside class="right">
-      <div class="side-heading">
-        <h2>Tulajdonságok</h2>
+      <div class="side-heading panel-title">
+        <span class="panel-icon">◫</span><div><small>RÉSZLETEK</small><h2>Tulajdonságok</h2></div>
         <button id="renameRoom" title="Helyiség átnevezése">✎</button>
       </div>
       <div id="props"><p class="hint">Válassz ki egy bútort a szerkesztéshez.</p></div>

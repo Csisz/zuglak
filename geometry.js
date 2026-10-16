@@ -1,4 +1,4 @@
-/* Pure geometry helpers for Zuglak Studio 1.5. Coordinates and dimensions are centimetres. */
+/* Pure geometry helpers for Zuglak Studio 1.6. Coordinates and dimensions are centimetres. */
 (function (root, factory) {
   const value = factory();
   if (typeof module === 'object' && module.exports) module.exports = value;

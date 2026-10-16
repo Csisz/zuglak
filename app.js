@@ -1,4 +1,4 @@
-/* Zuglak Studio 1.5: offline, local-first smart 2D room planner. */
+/* Zuglak Studio 1.6 Visual Edition: offline, local-first smart 2D room planner. */
 (() => {
   'use strict';
 
@@ -18,7 +18,7 @@
     ['sofa', 'Kanapé', 220, 95], ['armchair', 'Fotel', 82, 86], ['bed', 'Ágy', 180, 200],
     ['table', 'Étkezőasztal', 160, 90], ['chair', 'Szék', 46, 50], ['wardrobe', 'Szekrény', 180, 60],
     ['dresser', 'Komód', 120, 45], ['rug', 'Szőnyeg', 200, 140], ['desk', 'Íróasztal', 120, 60],
-    ['coffee', 'Dohányzóasztal', 110, 60], ['plant', 'Növény', 42, 42], ['shelf', 'Polc', 100, 34],
+    ['coffee', 'Dohányzóasztal', 110, 60], ['plant', 'Növény', 42, 42], ['lamp', 'Állólámpa', 36, 36], ['shelf', 'Polc', 100, 34],
     ['tv', 'TV', 120, 15], ['stool', 'Hokedli', 38, 38], ['bath', 'Fürdőkád', 170, 75], ['sink', 'Mosdó', 55, 45]
   ].map(([type, name, width, depth]) => ({ type, name, width, depth, category: 'basic' }));
 
@@ -184,103 +184,131 @@
     ctx.stroke();
   }
 
-  // Purpose-built vector floor-plan illustrations; no product photography is copied.
+  // Purpose-built vector floor-plan illustrations; no product photography or invented product contours.
   function art(type, width, height, isIkea = false) {
     const min = Math.min(width, height);
-    const pad = Math.max(2 / view.z, min * 0.09);
+    const pad = Math.max(2 / view.z, min * 0.075);
+    const line = Math.max(.65 / view.z, min * .012);
     const palette = isIkea
-      ? { base: '#d9ddcf', light: '#f1f1e9', edge: '#65786a', accent: '#9bab99', wood: '#c8a77d' }
-      : { base: '#d8d1c4', light: '#eeeae1', edge: '#7d7a70', accent: '#b5ad9f', wood: '#c9a57f' };
+      ? { base: '#c8d0c4', light: '#f4f2e9', edge: '#596b62', accent: '#91a294', wood: '#cba476', darkWood: '#8b6644' }
+      : { base: '#d8d0c3', light: '#f3eee6', edge: '#736e64', accent: '#b2a99b', wood: '#caa277', darkWood: '#89684c' };
     const rect = (x, y, w, h, r, color, stroke = palette.edge) => rounded(x, y, w, h, r, color, stroke);
+    const linear = (x1, y1, x2, y2, stops) => {
+      const gradient = ctx.createLinearGradient(x1, y1, x2, y2);
+      stops.forEach(([offset, color]) => gradient.addColorStop(offset, color));
+      return gradient;
+    };
 
     ctx.save();
-    rect(0, 0, width, height, min * 0.07, palette.base);
+    ctx.shadowColor = 'rgba(30,45,38,.19)';
+    ctx.shadowBlur = 8 / view.z;
+    ctx.shadowOffsetY = 3 / view.z;
+    rect(0, 0, width, height, min * .075, linear(0, 0, width, height, [[0, palette.light], [1, palette.base]]));
+    ctx.shadowColor = 'transparent';
 
     if (type === 'sofa' || type === 'armchair') {
-      rect(pad * 0.85, pad * 1.25, width - pad * 1.7, height - pad * 2, min * 0.08, palette.light);
-      rect(0, 0, width, pad * 1.55, min * 0.04, palette.accent);
-      rect(0, 0, pad * 1.05, height, min * 0.04, palette.accent);
-      rect(width - pad * 1.05, 0, pad * 1.05, height, min * 0.04, palette.accent);
-      const cushions = type === 'sofa' ? (width > height * 2.2 ? 3 : 2) : 1;
-      for (let index = 1; index < cushions; index++) {
-        drawLine(width * index / cushions, pad * 1.7, width * index / cushions, height - pad, '#b4bdae');
+      const arm = Math.max(pad, width * .055);
+      const back = Math.max(pad * 1.18, height * .17);
+      rect(arm * .72, back * .72, width - arm * 1.44, height - back * 1.15, min * .075, linear(0, 0, 0, height, [[0, '#ebe9df'], [1, '#d6d9cf']]), '#718078');
+      rect(0, 0, width, back, min * .055, linear(0, 0, 0, back, [[0, '#aeb9ab'], [1, '#8f9d90']]));
+      rect(0, back * .25, arm, height - back * .25, min * .05, '#9eaa9d');
+      rect(width - arm, back * .25, arm, height - back * .25, min * .05, '#9eaa9d');
+      const cushions = type === 'sofa' ? (width > height * 2.15 ? 3 : 2) : 1;
+      for (let index = 0; index < cushions; index += 1) {
+        const gap = 1.5 / view.z;
+        const seatWidth = (width - arm * 2) / cushions;
+        rect(arm + index * seatWidth + gap, back + gap, seatWidth - gap * 2, height - back - pad * .65, min * .045, index % 2 ? '#e6e5dc' : '#eceae1', '#aeb7ad');
+        drawLine(arm + index * seatWidth + seatWidth * .16, back + seatWidth * .05, arm + index * seatWidth + seatWidth * .84, back + seatWidth * .05, '#f8f7f2', line);
       }
-      drawLine(pad * 1.3, height - pad * 1.2, width - pad * 1.3, height - pad * 1.2, '#c2c9bc');
+      drawLine(arm * .65, height - pad * .55, width - arm * .65, height - pad * .55, '#79887f', line);
     } else if (type === 'bed') {
-      rect(pad, pad * 0.75, width - 2 * pad, height - pad * 1.5, min * 0.04, '#f4f2eb');
-      rect(0, 0, width, pad * 1.2, min * 0.025, palette.accent);
-      rect(pad * 1.2, pad * 1.5, width / 2 - pad * 1.45, height * 0.18, min * 0.04, '#fff');
-      rect(width / 2 + pad * 0.25, pad * 1.5, width / 2 - pad * 1.45, height * 0.18, min * 0.04, '#fff');
-      rect(pad * 1.05, height * 0.35, width - pad * 2.1, height * 0.52, min * 0.04, '#c9d5d1');
-      drawLine(pad * 1.2, height * 0.56, width - pad * 1.2, height * 0.56, '#e8efeb', 2 / view.z);
-      drawLine(pad * 1.2, height * 0.7, width - pad * 1.2, height * 0.7, '#b8c9c2');
-    } else if (['table', 'desk', 'coffee'].includes(type)) {
-      rect(pad * 0.45, pad * 0.45, width - pad * 0.9, height - pad * 0.9, min * 0.07, palette.wood);
-      ctx.globalAlpha = 0.45;
-      for (let index = 1; index < 5; index++) {
-        drawLine(width * index / 5, pad, width * index / 5, height - pad, '#967655');
-      }
+      rect(pad * .55, pad * .4, width - pad * 1.1, height - pad * .8, min * .045, '#f8f5ee', '#8e8172');
+      rect(0, 0, width, pad * 1.25, min * .035, linear(0, 0, width, 0, [[0, '#8c6b4f'], [.5, '#b28d68'], [1, '#8c6b4f']]));
+      const pillowY = pad * 1.45;
+      rect(pad * 1.05, pillowY, width / 2 - pad * 1.25, height * .17, min * .055, '#fffdfa', '#c8c4ba');
+      rect(width / 2 + pad * .2, pillowY, width / 2 - pad * 1.25, height * .17, min * .055, '#fffdfa', '#c8c4ba');
+      const duvet = linear(0, height * .35, width, height, [[0, '#b8cbc3'], [.5, '#d4dfda'], [1, '#a9c0b7']]);
+      rect(pad * .82, height * .34, width - pad * 1.64, height * .58, min * .05, duvet, '#8ba79c');
+      ctx.globalAlpha = .5;
+      drawLine(width * .38, height * .38, width * .32, height * .88, '#f5f8f6', 2 / view.z);
+      drawLine(width * .66, height * .38, width * .7, height * .88, '#8fa99f', line);
       ctx.globalAlpha = 1;
-      const leg = Math.max(2 / view.z, min * 0.1);
-      [[pad, pad], [width - pad - leg, pad], [pad, height - pad - leg], [width - pad - leg, height - pad - leg]].forEach(([x, y]) => rect(x, y, leg, leg, leg / 2, '#8e7156'));
-    } else if (type === 'chair' || type === 'stool') {
-      rect(pad, pad, width - 2 * pad, height - 2 * pad, min * 0.08, '#e4d1b5');
-      if (type === 'chair') rect(pad * 0.6, pad * 0.55, width - pad * 1.2, Math.max(3 / view.z, height * 0.17), min * 0.03, '#9b7c60');
-      const radius = Math.max(1.5 / view.z, min * 0.045);
-      [[pad, height - pad], [width - pad, height - pad]].forEach(([x, y]) => {
-        ctx.beginPath(); ctx.arc(x, y, radius, 0, Math.PI * 2); ctx.fillStyle = '#80684f'; ctx.fill();
-      });
-    } else if (type === 'wardrobe') {
-      rect(pad * 0.45, pad * 0.45, width - pad * 0.9, height - pad * 0.9, min * 0.035, '#d8cfbf');
-      const doors = width > height * 2 ? 3 : 2;
-      for (let index = 1; index < doors; index++) drawLine(width * index / doors, pad * 0.5, width * index / doors, height - pad * 0.5, '#94897c', 1.3 / view.z);
-      for (let index = 0; index < doors; index++) {
-        const center = width * (index + 0.5) / doors;
-        rect(center - min * 0.015, height * 0.43, min * 0.03, height * 0.15, min * 0.01, '#746f65', null);
-      }
-      drawLine(pad, height - pad * 1.2, width - pad, height - pad * 1.2, '#a69a8b');
-    } else if (type === 'dresser' || type === 'shelf') {
-      rect(pad * 0.5, pad * 0.5, width - pad, height - pad, min * 0.025, '#d1c1ad');
-      const sections = width > height * 2 ? 4 : 3;
-      for (let index = 1; index < sections; index++) drawLine(width * index / sections, pad * 0.55, width * index / sections, height - pad * 0.55, '#9f8d78');
-      drawLine(pad, height / 2, width - pad, height / 2, '#ae9a82');
-    } else if (type === 'rug') {
-      ctx.setLineDash([5 / view.z, 5 / view.z]);
-      ctx.strokeStyle = '#b99f85';
-      ctx.lineWidth = Math.max(1, 2 / view.z);
-      ctx.strokeRect(pad, pad, width - 2 * pad, height - 2 * pad);
-      ctx.setLineDash([]);
-    } else if (type === 'plant') {
-      const radius = min * 0.33;
-      ctx.fillStyle = '#638964';
-      for (let index = 0; index < 8; index++) {
-        const angle = index * Math.PI * 2 / 8;
+    } else if (['table', 'desk', 'coffee'].includes(type)) {
+      const tabletop = linear(0, 0, width, height, [[0, '#dfc197'], [.48, palette.wood], [1, '#b98d61']]);
+      rect(pad * .34, pad * .34, width - pad * .68, height - pad * .68, min * .07, tabletop, '#8d694a');
+      ctx.save();
+      ctx.globalAlpha = .3;
+      for (let index = 1; index < 7; index += 1) {
+        const x = width * index / 7;
         ctx.beginPath();
-        ctx.ellipse(width / 2 + Math.cos(angle) * radius * 0.43, height / 2 + Math.sin(angle) * radius * 0.43, radius * 0.62, radius * 0.28, angle, 0, Math.PI * 2);
-        ctx.fill();
+        ctx.moveTo(x, pad * .7);
+        ctx.bezierCurveTo(x + min * .035, height * .35, x - min * .025, height * .7, x, height - pad * .7);
+        ctx.strokeStyle = '#805d3d'; ctx.lineWidth = line; ctx.stroke();
       }
-      ctx.beginPath(); ctx.arc(width / 2, height / 2, radius * 0.28, 0, Math.PI * 2); ctx.fillStyle = '#96b474'; ctx.fill();
+      ctx.restore();
+      const leg = Math.max(2.5 / view.z, min * .085);
+      [[pad * .8, pad * .8], [width - pad * .8 - leg, pad * .8], [pad * .8, height - pad * .8 - leg], [width - pad * .8 - leg, height - pad * .8 - leg]].forEach(([x, y]) => rect(x, y, leg, leg, leg / 2, palette.darkWood, null));
+      if (type === 'desk') drawLine(width * .15, height * .72, width * .85, height * .72, '#9a734f', line);
+    } else if (type === 'chair' || type === 'stool') {
+      const seat = linear(0, 0, width, height, [[0, '#ead7ba'], [1, '#c8a77e']]);
+      rect(pad * .88, pad, width - pad * 1.76, height - pad * 1.9, min * .11, seat, '#896e55');
+      if (type === 'chair') {
+        rect(pad * .5, pad * .35, width - pad, Math.max(4 / view.z, height * .17), min * .04, '#9a7657', '#755a45');
+        drawLine(pad, pad * .92, pad * .88, height - pad * .5, '#7d624d', 1.5 / view.z);
+        drawLine(width - pad, pad * .92, width - pad * .88, height - pad * .5, '#7d624d', 1.5 / view.z);
+      }
+      const foot = Math.max(1.6 / view.z, min * .038);
+      [[pad, height - pad], [width - pad, height - pad]].forEach(([x, y]) => { ctx.beginPath(); ctx.arc(x, y, foot, 0, Math.PI * 2); ctx.fillStyle = '#695342'; ctx.fill(); });
+    } else if (type === 'wardrobe') {
+      rect(pad * .3, pad * .3, width - pad * .6, height - pad * .6, min * .025, linear(0, 0, width, 0, [[0, '#e3ddd1'], [.5, '#cfc7ba'], [1, '#eee9e0']]), '#827a6e');
+      const doors = width > height * 2.5 ? 4 : width > height * 1.5 ? 3 : 2;
+      for (let index = 1; index < doors; index += 1) drawLine(width * index / doors, pad * .38, width * index / doors, height - pad * .38, '#968e82', line);
+      for (let index = 0; index < doors; index += 1) {
+        const center = width * (index + .5) / doors;
+        rect(center - Math.max(1 / view.z, min * .012), height * .41, Math.max(2 / view.z, min * .024), height * .18, min * .01, '#756f66', null);
+      }
+      drawLine(pad * .7, height - pad, width - pad * .7, height - pad, '#aaa195', line);
+    } else if (type === 'dresser' || type === 'shelf') {
+      rect(pad * .35, pad * .35, width - pad * .7, height - pad * .7, min * .025, linear(0, 0, width, height, [[0, '#decbb2'], [1, '#bba184']]), '#826d57');
+      const sections = width > height * 2 ? 4 : 3;
+      for (let index = 1; index < sections; index += 1) drawLine(width * index / sections, pad * .4, width * index / sections, height - pad * .4, '#947b62', line);
+      drawLine(pad * .5, height / 2, width - pad * .5, height / 2, '#9f856b', line);
+      for (let index = 0; index < sections; index += 1) {
+        ctx.beginPath(); ctx.arc(width * (index + .5) / sections, height / 2, Math.max(1 / view.z, min * .018), 0, Math.PI * 2); ctx.fillStyle = '#6f5b49'; ctx.fill();
+      }
+    } else if (type === 'rug') {
+      rect(pad * .25, pad * .25, width - pad * .5, height - pad * .5, min * .055, linear(0, 0, width, height, [[0, '#d9c2a8'], [1, '#b69b81']]), '#9e8168');
+      ctx.save(); ctx.globalAlpha = .32; ctx.strokeStyle = '#fff7ed'; ctx.lineWidth = Math.max(1 / view.z, min * .018);
+      for (let index = 1; index < 5; index += 1) { ctx.beginPath(); ctx.moveTo(pad, height * index / 5); ctx.lineTo(width - pad, height * index / 5); ctx.stroke(); }
+      ctx.setLineDash([5 / view.z, 4 / view.z]); ctx.strokeRect(pad, pad, width - pad * 2, height - pad * 2); ctx.restore();
+    } else if (type === 'plant') {
+      const radius = min * .33;
+      const leafColors = ['#3e785b', '#568a64', '#6c9a6b', '#2f684f'];
+      for (let index = 0; index < 12; index += 1) {
+        const angle = index * Math.PI * 2 / 12;
+        ctx.save(); ctx.translate(width / 2, height / 2); ctx.rotate(angle);
+        ctx.beginPath(); ctx.ellipse(radius * .45, 0, radius * .7, radius * .22, 0, 0, Math.PI * 2); ctx.fillStyle = leafColors[index % leafColors.length]; ctx.fill(); ctx.restore();
+      }
+      ctx.beginPath(); ctx.arc(width / 2, height / 2, radius * .32, 0, Math.PI * 2); ctx.fillStyle = '#a9805b'; ctx.fill(); ctx.strokeStyle = '#6d573f'; ctx.lineWidth = line; ctx.stroke();
+    } else if (type === 'lamp') {
+      const radius = min * .4;
+      ctx.beginPath(); ctx.arc(width / 2, height / 2, radius, 0, Math.PI * 2); ctx.fillStyle = '#d5b36e'; ctx.fill(); ctx.strokeStyle = '#7c6949'; ctx.lineWidth = line; ctx.stroke();
+      ctx.beginPath(); ctx.arc(width / 2, height / 2, radius * .55, 0, Math.PI * 2); ctx.fillStyle = '#fff7d8'; ctx.fill();
+      ctx.beginPath(); ctx.arc(width / 2, height / 2, radius * .12, 0, Math.PI * 2); ctx.fillStyle = '#7b6746'; ctx.fill();
     } else if (type === 'tv') {
-      rect(pad, pad, width - pad * 2, height - pad * 2, min * 0.02, '#20292c');
-      drawLine(width / 2, height - pad, width / 2, height, '#667273', 2 / view.z);
+      rect(pad * .7, pad, width - pad * 1.4, height - pad * 2, min * .025, linear(0, 0, width, height, [[0, '#263236'], [1, '#111719']]), '#4d5a5d');
+      drawLine(width / 2, height - pad, width / 2, height, '#596568', 2 / view.z);
     } else if (type === 'bath' || type === 'sink') {
-      rect(pad, pad, width - 2 * pad, height - 2 * pad, min * 0.23, '#fbfefe');
-      ctx.beginPath(); ctx.arc(width * 0.8, height * 0.5, Math.max(1 / view.z, min * 0.045), 0, Math.PI * 2); ctx.fillStyle = '#aebdc0'; ctx.fill();
+      rect(pad * .55, pad * .55, width - pad * 1.1, height - pad * 1.1, min * .22, linear(0, 0, width, height, [[0, '#fff'], [1, '#dae8e9']]), '#93a8aa');
+      ctx.beginPath(); ctx.arc(width * .8, height * .5, Math.max(1 / view.z, min * .045), 0, Math.PI * 2); ctx.fillStyle = '#91a6a8'; ctx.fill();
     } else {
-      ctx.setLineDash([4 / view.z, 3 / view.z]);
-      ctx.strokeStyle = palette.edge;
-      ctx.strokeRect(pad, pad, width - 2 * pad, height - 2 * pad);
-      ctx.setLineDash([]);
+      ctx.setLineDash([4 / view.z, 3 / view.z]); ctx.strokeStyle = palette.edge; ctx.strokeRect(pad, pad, width - 2 * pad, height - 2 * pad); ctx.setLineDash([]);
     }
 
     if (isIkea && width > 55 / view.z && height > 22 / view.z) {
-      const fontSize = clamp(min * 0.12, 8 / view.z, 13 / view.z);
-      ctx.font = `700 ${fontSize}px system-ui`;
-      ctx.textAlign = 'right';
-      ctx.textBaseline = 'bottom';
-      ctx.fillStyle = '#52675a';
-      ctx.globalAlpha = 0.72;
-      ctx.fillText('IKEA', width - pad, height - pad * 0.65);
+      const fontSize = clamp(min * .1, 7 / view.z, 11 / view.z);
+      ctx.font = `750 ${fontSize}px system-ui`; ctx.textAlign = 'right'; ctx.textBaseline = 'bottom'; ctx.fillStyle = '#465b52'; ctx.globalAlpha = .62;
+      ctx.fillText('IKEA', width - pad * .65, height - pad * .45);
     }
     ctx.restore();
   }
@@ -298,6 +326,58 @@
       ctx.strokeStyle = stroke;
       ctx.lineWidth = Math.max(0.8 / view.z, lineWidth / view.z);
       ctx.stroke();
+    }
+    ctx.restore();
+  }
+
+  function polygonPath(points) {
+    ctx.beginPath();
+    ctx.moveTo(points[0].x, points[0].y);
+    points.slice(1).forEach(point => ctx.lineTo(point.x, point.y));
+    ctx.closePath();
+  }
+
+  function drawFloorSurface(points, material = 'oak-light') {
+    if (points.length < 3) return;
+    const styles = {
+      'oak-light': { base: '#ead9bd', light: '#f3e6cf', line: '#c9ad83', knot: '#b89164' },
+      'oak-natural': { base: '#d8b581', light: '#ead0a5', line: '#b28756', knot: '#8f673e' },
+      walnut: { base: '#9a7151', light: '#b88b65', line: '#755039', knot: '#5f3e2c' },
+      plain: { base: '#e9e5db', light: '#f4f1e9', line: '#d9d4c9', knot: '#c8c1b3' }
+    };
+    const style = styles[material] || styles['oak-light'];
+    const bounds = points.reduce((value, point) => ({
+      minX: Math.min(value.minX, point.x), minY: Math.min(value.minY, point.y),
+      maxX: Math.max(value.maxX, point.x), maxY: Math.max(value.maxY, point.y)
+    }), { minX: Infinity, minY: Infinity, maxX: -Infinity, maxY: -Infinity });
+    ctx.save();
+    polygonPath(points);
+    ctx.clip();
+    ctx.globalAlpha = mode === 'walls' || mode === 'calibrate' ? .58 : .94;
+    const wash = ctx.createLinearGradient(bounds.minX, bounds.minY, bounds.maxX, bounds.maxY);
+    wash.addColorStop(0, style.light); wash.addColorStop(.48, style.base); wash.addColorStop(1, style.light);
+    ctx.fillStyle = wash;
+    ctx.fillRect(bounds.minX, bounds.minY, bounds.maxX - bounds.minX, bounds.maxY - bounds.minY);
+    if (material !== 'plain') {
+      const plank = Math.max(28, 34 * (scale() || 2));
+      const board = plank * .28;
+      ctx.lineWidth = Math.max(.45 / view.z, .7);
+      ctx.strokeStyle = style.line;
+      ctx.globalAlpha *= .42;
+      for (let y = Math.floor(bounds.minY / board) * board; y <= bounds.maxY; y += board) {
+        drawLine(bounds.minX, y, bounds.maxX, y, style.line, .7 / view.z);
+      }
+      let row = 0;
+      for (let y = Math.floor(bounds.minY / board) * board; y < bounds.maxY; y += board, row += 1) {
+        const offset = row % 2 ? plank * .48 : 0;
+        for (let x = Math.floor((bounds.minX - offset) / plank) * plank + offset; x <= bounds.maxX; x += plank) {
+          drawLine(x, y, x, y + board, style.line, .7 / view.z);
+          if ((row + Math.round(x / plank)) % 4 === 0) {
+            ctx.beginPath(); ctx.ellipse(x + plank * .28, y + board * .52, plank * .045, board * .12, 0, 0, Math.PI * 2);
+            ctx.strokeStyle = style.knot; ctx.stroke();
+          }
+        }
+      }
     }
     ctx.restore();
   }
@@ -324,30 +404,36 @@
       if (object.type === 'door') {
         const zoneCm = Geometry.doorClearancePolygon(object, geometry.vertices);
         const zone = zoneCm.map(pointToWorld);
-        drawPolygon(zone, '#e9856b1f', active ? '#c64e3d' : '#d98670', 1.2, true);
+        drawPolygon(zone, active ? '#df81652d' : '#dca58c1c', null);
         const hinge = zone[0];
         const closedEnd = zone[1];
         const openEnd = zone.at(-1);
-        drawLine(hinge.x, hinge.y, closedEnd.x, closedEnd.y, active ? '#9d2e27' : '#a85d50', 3 / view.z);
-        drawLine(hinge.x, hinge.y, openEnd.x, openEnd.y, active ? '#9d2e27' : '#a85d50', 2 / view.z);
+        const a = pointToWorld(opening.a);
+        const b = pointToWorld(opening.b);
+        drawLine(a.x, a.y, b.x, b.y, '#f2e5cf', 9 / view.z);
+        ctx.save();
+        ctx.beginPath(); ctx.moveTo(closedEnd.x, closedEnd.y); zone.slice(2).forEach(point => ctx.lineTo(point.x, point.y));
+        ctx.strokeStyle = active ? '#bd5948' : '#b9836f'; ctx.lineWidth = 1.2 / view.z; ctx.setLineDash([5 / view.z, 4 / view.z]); ctx.stroke(); ctx.restore();
+        drawLine(hinge.x, hinge.y, openEnd.x, openEnd.y, active ? '#8f4034' : '#956354', 3 / view.z);
+        drawLine(hinge.x, hinge.y, closedEnd.x, closedEnd.y, '#c5a18b', 1 / view.z);
         ctx.beginPath();
-        ctx.arc(hinge.x, hinge.y, Math.max(3 / view.z, 4 / view.z), 0, Math.PI * 2);
-        ctx.fillStyle = '#a34f43';
-        ctx.fill();
+        ctx.arc(hinge.x, hinge.y, 3.4 / view.z, 0, Math.PI * 2);
+        ctx.fillStyle = active ? '#a54438' : '#9c6959'; ctx.fill();
       } else if (object.type === 'window') {
         const a = pointToWorld(opening.a);
         const b = pointToWorld(opening.b);
-        drawLine(a.x, a.y, b.x, b.y, active ? '#1763a1' : '#4c91be', 7 / view.z);
-        drawLine(a.x, a.y, b.x, b.y, '#dff4ff', 2.5 / view.z);
+        drawLine(a.x, a.y, b.x, b.y, '#f7f5ef', 10 / view.z);
+        drawLine(a.x, a.y, b.x, b.y, active ? '#277baa' : '#5d9db8', 6 / view.z);
+        drawLine(a.x, a.y, b.x, b.y, '#dff5f7', 2 / view.z);
       } else if (object.type === 'radiator') {
         const polygon = Geometry.radiatorPolygon(object, geometry.vertices).map(pointToWorld);
-        drawPolygon(polygon, '#e2b490cc', active ? '#9d4d28' : '#b8734f', 1.5);
+        drawPolygon(polygon, active ? '#d7a47d' : '#e8d6c3', active ? '#985233' : '#a9866e', 1.5);
         if (polygon.length === 4) {
-          for (let index = 1; index < 4; index += 1) {
-            const ratio = index / 4;
+          for (let index = 1; index < 7; index += 1) {
+            const ratio = index / 7;
             const a = { x: polygon[0].x + (polygon[1].x - polygon[0].x) * ratio, y: polygon[0].y + (polygon[1].y - polygon[0].y) * ratio };
             const b = { x: polygon[3].x + (polygon[2].x - polygon[3].x) * ratio, y: polygon[3].y + (polygon[2].y - polygon[3].y) * ratio };
-            drawLine(a.x, a.y, b.x, b.y, '#b8734f', 0.8 / view.z);
+            drawLine(a.x, a.y, b.x, b.y, '#b59175', .8 / view.z);
           }
         }
       }
@@ -358,14 +444,25 @@
     const geometry = activeGeometry();
     if (!geometry || !scale() || !geometry.vertices.length) return;
     const points = geometry.vertices.map(pointToWorld);
-    if (geometry.closed && points.length >= 3) drawPolygon(points, '#4f9b7420', '#287358', 3);
+    if (geometry.closed && points.length >= 3) {
+      drawFloorSurface(points, geometry.floorMaterial || 'oak-light');
+      ctx.save();
+      polygonPath(points);
+      ctx.shadowColor = 'rgba(48,42,33,.28)'; ctx.shadowBlur = 9 / view.z; ctx.shadowOffsetY = 4 / view.z;
+      ctx.strokeStyle = '#6b716c'; ctx.lineWidth = 10 / view.z; ctx.lineJoin = 'round'; ctx.stroke();
+      ctx.shadowColor = 'transparent';
+      ctx.strokeStyle = '#f6f4ee'; ctx.lineWidth = 5.5 / view.z; ctx.stroke();
+      ctx.strokeStyle = '#b9bbb4'; ctx.lineWidth = 1 / view.z; ctx.stroke();
+      ctx.restore();
+    }
     else {
       ctx.save();
       ctx.beginPath();
       ctx.moveTo(points[0].x, points[0].y);
       points.slice(1).forEach(point => ctx.lineTo(point.x, point.y));
-      ctx.strokeStyle = '#287358';
-      ctx.lineWidth = 3 / view.z;
+      ctx.strokeStyle = '#277769';
+      ctx.lineWidth = 4 / view.z;
+      ctx.lineCap = 'round'; ctx.lineJoin = 'round';
       ctx.stroke();
       ctx.restore();
     }
@@ -378,6 +475,7 @@
       drawDimensionLabel(start, end, `${confirmed ? '' : '≈ '}${cm.toFixed(1)} cm`, confirmed ? '#1d644b' : '#866528');
     }
     drawArchitecture(geometry);
+    if (mode !== 'walls') return;
     for (let index = 0; index < points.length; index += 1) {
       const point = points[index];
       ctx.beginPath();
@@ -472,11 +570,15 @@
     ctx.rotate(rad(item.rot));
     art(item.type, size.w, size.h, item.source === 'ikea');
     if (item.id === selected) {
-      ctx.strokeStyle = '#1c795c';
-      ctx.setLineDash([7 / view.z, 4 / view.z]);
-      ctx.lineWidth = 2 / view.z;
-      ctx.strokeRect(-3 / view.z, -3 / view.z, size.w + 6 / view.z, size.h + 6 / view.z);
+      ctx.save();
+      ctx.shadowColor = 'rgba(23,111,99,.32)'; ctx.shadowBlur = 10 / view.z;
+      ctx.strokeStyle = '#137568'; ctx.setLineDash([6 / view.z, 4 / view.z]); ctx.lineWidth = 2 / view.z;
+      ctx.strokeRect(-4 / view.z, -4 / view.z, size.w + 8 / view.z, size.h + 8 / view.z);
       ctx.setLineDash([]);
+      for (const [x, y] of [[0, 0], [size.w, 0], [size.w, size.h], [0, size.h]]) {
+        ctx.beginPath(); ctx.arc(x, y, 3.5 / view.z, 0, Math.PI * 2); ctx.fillStyle = '#fff'; ctx.fill(); ctx.strokeStyle = '#137568'; ctx.lineWidth = 1.5 / view.z; ctx.stroke();
+      }
+      ctx.restore();
     }
     if (warningItemIds.has(item.id)) {
       ctx.strokeStyle = '#c6563f';
@@ -637,6 +739,8 @@
     }
     $('closeGeometry').disabled = !activeGeometry() || activeGeometry().closed || activeGeometry().vertices.length < 3;
     $('deleteGeometry').disabled = !activeGeometry();
+    $('floorMaterial').disabled = !activeGeometry();
+    $('floorMaterial').value = activeGeometry()?.floorMaterial || 'oak-light';
   }
 
   function renderRooms() {
@@ -653,7 +757,11 @@
       thumbnail.src = roomPlan.url;
       thumbnail.alt = '';
       const label = document.createElement('span');
-      label.textContent = roomData.name;
+      const labelName = document.createElement('strong');
+      const labelMeta = document.createElement('small');
+      labelName.textContent = roomData.name;
+      labelMeta.textContent = `${Object.keys(roomData.variants).length} változat · ${roomData.geometries?.length || 0} geometria`;
+      label.append(labelName, labelMeta);
       button.append(thumbnail, label);
       button.onclick = () => openRoom(roomPlan.id);
       row.append(button);
@@ -692,8 +800,18 @@
       bed: `<rect x="13" y="4" width="44" height="51" rx="4" ${common}/><rect x="17" y="11" width="17" height="12" rx="3" fill="#fff"/><rect x="36" y="11" width="17" height="12" rx="3" fill="#fff"/><rect x="17" y="27" width="36" height="23" rx="3" fill="#c7d7d0"/>`,
       wardrobe: `<rect x="5" y="13" width="60" height="32" rx="3" ${common}/><path d="M25 14v30M45 14v30" stroke="${accent}"/><circle cx="22" cy="29" r="1.5" fill="${accent}"/><circle cx="42" cy="29" r="1.5" fill="${accent}"/>`,
       chair: `<rect x="18" y="12" width="34" height="36" rx="7" ${common}/><path d="M20 18h30" stroke="${accent}" stroke-width="5"/>`,
+      stool: `<circle cx="35" cy="29" r="17" ${common}/><circle cx="35" cy="29" r="11" fill="#ead6b8" stroke="${accent}"/><circle cx="25" cy="39" r="2" fill="${accent}"/><circle cx="45" cy="39" r="2" fill="${accent}"/>`,
       shelf: `<rect x="7" y="14" width="56" height="30" rx="3" ${common}/><path d="M21 15v28M35 15v28M49 15v28M8 29h54" stroke="${accent}"/>`,
-      table: `<rect x="6" y="11" width="58" height="36" rx="7" ${common}/><circle cx="13" cy="18" r="3" fill="${accent}"/><circle cx="57" cy="18" r="3" fill="${accent}"/><circle cx="13" cy="40" r="3" fill="${accent}"/><circle cx="57" cy="40" r="3" fill="${accent}"/>`
+      dresser: `<rect x="7" y="14" width="56" height="30" rx="3" ${common}/><path d="M8 29h54M26 15v28M44 15v28" stroke="${accent}"/><circle cx="17" cy="23" r="1.5" fill="${accent}"/><circle cx="35" cy="23" r="1.5" fill="${accent}"/><circle cx="53" cy="23" r="1.5" fill="${accent}"/>`,
+      table: `<rect x="6" y="11" width="58" height="36" rx="7" fill="#d6b181" stroke="${accent}" stroke-width="1.4"/><path d="M18 12v34M30 12v34M42 12v34M54 12v34" stroke="#a98459" opacity=".55"/><circle cx="13" cy="18" r="3" fill="${accent}"/><circle cx="57" cy="18" r="3" fill="${accent}"/><circle cx="13" cy="40" r="3" fill="${accent}"/><circle cx="57" cy="40" r="3" fill="${accent}"/>`,
+      desk: `<rect x="6" y="11" width="58" height="36" rx="5" fill="#d6b181" stroke="${accent}" stroke-width="1.4"/><path d="M16 17h38M16 24h38" stroke="#a98459" opacity=".6"/><circle cx="13" cy="40" r="3" fill="${accent}"/><circle cx="57" cy="40" r="3" fill="${accent}"/>`,
+      coffee: `<rect x="8" y="14" width="54" height="30" rx="12" fill="#d6b181" stroke="${accent}" stroke-width="1.4"/><path d="M18 15v28M30 15v28M42 15v28M54 15v28" stroke="#a98459" opacity=".5"/>`,
+      rug: `<rect x="7" y="9" width="56" height="40" rx="5" fill="#d8c0a7" stroke="${accent}"/><path d="M12 17h46M12 25h46M12 33h46M12 41h46" stroke="#fff" opacity=".55"/><rect x="13" y="15" width="44" height="28" rx="3" fill="none" stroke="${accent}" stroke-dasharray="3 3"/>`,
+      plant: `<circle cx="35" cy="30" r="11" fill="#a77f58" stroke="${accent}"/><g fill="#4f865f"><ellipse cx="35" cy="15" rx="5" ry="13"/><ellipse cx="48" cy="22" rx="5" ry="13" transform="rotate(50 48 22)"/><ellipse cx="22" cy="22" rx="5" ry="13" transform="rotate(-50 22 22)"/><ellipse cx="47" cy="38" rx="5" ry="13" transform="rotate(120 47 38)"/><ellipse cx="23" cy="38" rx="5" ry="13" transform="rotate(-120 23 38)"/></g>`,
+      lamp: `<circle cx="35" cy="29" r="20" fill="#d8b970" stroke="${accent}" stroke-width="1.4"/><circle cx="35" cy="29" r="12" fill="#fff4cf" stroke="#a88a54"/><circle cx="35" cy="29" r="3" fill="${accent}"/>`,
+      tv: `<rect x="5" y="21" width="60" height="16" rx="3" fill="#263338" stroke="${accent}"/><path d="M35 37v7M25 44h20" stroke="${accent}"/>`,
+      bath: `<rect x="8" y="8" width="54" height="43" rx="18" fill="#eef7f7" stroke="${accent}"/><ellipse cx="35" cy="29" rx="19" ry="13" fill="#fff" stroke="#9bb5b7"/><circle cx="50" cy="29" r="2" fill="#8ca5a8"/>`,
+      sink: `<rect x="13" y="9" width="44" height="40" rx="14" fill="#eef7f7" stroke="${accent}"/><ellipse cx="35" cy="30" rx="13" ry="10" fill="#fff" stroke="#9bb5b7"/><circle cx="35" cy="16" r="2" fill="#8ca5a8"/>`
     };
     return `<svg viewBox="0 0 70 58" aria-hidden="true">${artByType[type] || artByType.table}</svg>`;
   }
@@ -1231,6 +1349,7 @@
     if (!data.rooms[id]) id = 'room1';
     roomId = id;
     data.currentRoom = id;
+    $('canvasRoomName').textContent = room().name;
     selected = null;
     selectedVertex = null;
     selectedArchitecture = null;
@@ -1600,6 +1719,13 @@
     selectedArchitecture = null;
     save(); renderGeometryControls(); renderProps(); draw();
   };
+  $('floorMaterial').onchange = event => {
+    const geometry = activeGeometry();
+    if (!geometry) return;
+    geometry.floorMaterial = event.target.value;
+    save(); draw();
+    flash('Padlóburkolat frissítve. A geometriai méretek nem változtak.');
+  };
   $('newGeometry').onclick = createGeometry;
   $('closeGeometry').onclick = closeActiveGeometry;
   $('deleteGeometry').onclick = () => {
@@ -1657,6 +1783,7 @@
     ]);
     if (answer?.name?.trim()) {
       room().name = answer.name.trim();
+      $('canvasRoomName').textContent = room().name;
       save(); renderRooms();
     }
   };
@@ -1753,7 +1880,7 @@
   $('exportJSON').onclick = () => {
     const exportData = structuredClone(data);
     exportData.favoriteProducts = favorites;
-    exportData.exportedBy = 'Zuglak Studio 1.5';
+    exportData.exportedBy = 'Zuglak Studio 1.6';
     download('zuglak-tervek.json', new Blob([JSON.stringify(exportData, null, 2)], { type: 'application/json' }));
   };
 

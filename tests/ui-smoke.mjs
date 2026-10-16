@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { existsSync, createReadStream, mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, createReadStream, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { dirname, extname, join, normalize } from 'node:path';
@@ -94,9 +94,17 @@ try {
     await call('Input.dispatchMouseEvent', { type: 'mousePressed', x: point.x, y: point.y, button: 'left', clickCount: 1 });
     await call('Input.dispatchMouseEvent', { type: 'mouseReleased', x: point.x, y: point.y, button: 'left', clickCount: 1 });
   };
+  const capture = async name => {
+    if (!process.env.CAPTURE_UI) return;
+    const directory = join(root, 'artifacts');
+    mkdirSync(directory, { recursive: true });
+    const result = await call('Page.captureScreenshot', { format: 'png', captureBeyondViewport: false });
+    writeFileSync(join(directory, name), Buffer.from(result.data, 'base64'));
+  };
 
   await call('Runtime.enable');
   await waitFor(`document.readyState === 'complete' && document.querySelectorAll('.catalog-card').length === 11`);
+  assert.match(await evaluate(`document.querySelector('.version-pill').textContent`), /1\.6/);
   assert.equal(await evaluate(`document.querySelectorAll('#rooms .room').length`), 3);
   assert.equal(await evaluate(`document.querySelectorAll('.catalog-card').length`), 11);
   assert.match(await evaluate(`[...document.querySelectorAll('.catalog-card')].find(x => x.textContent.includes('KALLAX')).textContent`), /76\.5 × 39 cm/);
@@ -141,6 +149,10 @@ try {
   assert.equal(await evaluate(`JSON.parse(localStorage.getItem('zuglak-v2')).rooms.room1.geometries[0].vertices.length`), 4);
   await evaluate(`document.querySelector('#closeGeometry').click()`);
   assert.deepEqual(await evaluate(`(() => { const plan = JSON.parse(localStorage.getItem('zuglak-v2')); const geometry = plan.rooms.room1.geometries[0]; return { version: plan.version, closed: geometry.closed, objects: geometry.objects.length }; })()`), { version: 2, closed: true, objects: 0 });
+  const verticesBeforeFlooring = await evaluate(`JSON.stringify(JSON.parse(localStorage.getItem('zuglak-v2')).rooms.room1.geometries[0].vertices)`);
+  await evaluate(`(() => { const select = document.querySelector('#floorMaterial'); select.value = 'walnut'; select.dispatchEvent(new Event('change', { bubbles: true })); })()`);
+  assert.equal(await evaluate(`JSON.parse(localStorage.getItem('zuglak-v2')).rooms.room1.geometries[0].floorMaterial`), 'walnut');
+  assert.equal(await evaluate(`JSON.stringify(JSON.parse(localStorage.getItem('zuglak-v2')).rooms.room1.geometries[0].vertices)`), verticesBeforeFlooring);
 
   const tracedLength = await evaluate(`Number(document.querySelector('.wall-length-row input').value)`);
   await evaluate(`(() => { const input = document.querySelector('.wall-length-row input'); input.value = String(${tracedLength} + 10); input.dispatchEvent(new Event('change', { bubbles: true })); })()`);
@@ -165,6 +177,14 @@ try {
 
   await evaluate(`(() => { document.querySelector('#modeSelect').click(); document.querySelector('#snap').click(); })()`);
   assert.equal(await evaluate(`document.querySelector('#snap').getAttribute('aria-pressed')`), 'true');
+  await capture('zuglak-1.6-desktop.png');
+  if (process.env.CAPTURE_UI) {
+    await call('Emulation.setDeviceMetricsOverride', { width: 820, height: 1180, deviceScaleFactor: 1, mobile: false });
+    await evaluate(`window.scrollTo(0, document.querySelector('main').offsetTop)`);
+    await capture('zuglak-1.6-tablet.png');
+    await call('Emulation.setDeviceMetricsOverride', { width: 1440, height: 1000, deviceScaleFactor: 1, mobile: false });
+    await evaluate(`window.scrollTo(0, 0)`);
+  }
 
   await evaluate(`(async () => { const canvas = document.createElement('canvas'); canvas.width = 20; canvas.height = 20; const blob = await (await fetch(canvas.toDataURL('image/png'))).blob(); const transfer = new DataTransfer(); transfer.items.add(new File([blob], 'sajat-alaprajz.png', { type: 'image/png' })); const input = document.querySelector('#floorPlanUpload'); input.files = transfer.files; input.dispatchEvent(new Event('change', { bubbles: true })); })()`);
   await waitFor(`document.querySelector('#dialog').open`);
@@ -176,7 +196,7 @@ try {
   assert.equal(await evaluate(`getComputedStyle(document.querySelector('.workspace')).display`), 'flex');
   assert.ok(await evaluate(`document.querySelector('main').getBoundingClientRect().width >= 800`));
 
-  console.log('UI smoke: 1.4 regressziók, falgeometria, pontos méret, ajtó, mérés, snapping, ütközés és tablet nézet rendben.');
+  console.log('UI smoke: 1.4–1.5 regressziók, 1.6 vizuális réteg, pontos méretek, ajtó, mérés, snapping, ütközés és tablet nézet rendben.');
 } finally {
   if (socket?.readyState === WebSocket.OPEN) socket.close();
   if (chrome.exitCode === null) chrome.kill();
