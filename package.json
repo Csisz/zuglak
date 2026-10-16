@@ -1,8 +1,8 @@
 {
   "name": "zuglak-studio",
-  "version": "1.5.0",
+  "version": "1.6.0",
   "private": true,
-  "description": "Helyben futó intelligens 2D otthontervező valós szobageometriával",
+  "description": "Zuglak Studio Visual Edition – helyben futó, centiméter-pontos 2D otthontervező",
   "scripts": {
     "test": "node --test",
     "test:ui": "node tests/ui-smoke.mjs",
