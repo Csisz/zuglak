@@ -1,12 +1,13 @@
 {
   "name": "zuglak-studio",
-  "version": "1.6.0",
+  "version": "2.1.2",
   "private": true,
-  "description": "Zuglak Studio Visual Edition – helyben futó, centiméter-pontos 2D otthontervező",
+  "description": "Zuglak Studio 2.0 – helyben futó, centiméter-pontos 2D/3D otthontervező a saját alaprajzainkhoz",
   "scripts": {
+    "start": "python -m http.server 8765",
     "test": "node --test",
     "test:ui": "node tests/ui-smoke.mjs",
-    "check": "node --check core.js && node --check geometry.js && node --check ikea-catalog.js && node --check app.js && node --test"
+    "check": "node --check core.js && node --check geometry.js && node --check ikea-catalog.js && node --check catalog.js && node --check materials.js && node --check floorplans.js && node --check furniture2d.js && node --check pdf.js && node --check icons.js && node --check ai.js && node --check app.js && node --check models3d.js && node --check view3d.js && node --test"
   },
   "engines": {
     "node": ">=20"

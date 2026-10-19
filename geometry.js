@@ -1,4 +1,6 @@
-/* Pure geometry helpers for Zuglak Studio 1.6. Coordinates and dimensions are centimetres. */
+/* Pure geometry helpers for Zuglak Studio 2.0. Coordinates and dimensions are centimetres.
+ * Furniture convention: (x, y) is the item's local top-left corner, `rot` is clockwise
+ * degrees on screen around that corner, `w` is width and `h` is depth. */
 (function (root, factory) {
   const value = factory();
   if (typeof module === 'object' && module.exports) module.exports = value;
@@ -251,7 +253,16 @@
     const moving = rotatedRectCorners(item);
     const candidates = [];
     if (options.walls && Array.isArray(options.roomVertices) && options.roomVertices.length >= 2) {
-      const candidate = parallelEdgeSnap(moving, polygonEdges(options.roomVertices, options.roomClosed !== false), threshold, 'wall');
+      const edges = polygonEdges(options.roomVertices, options.roomClosed !== false);
+      for (const part of options.partitions || []) {
+        if (part.thickness) polygonEdges(partitionPolygon(part)).forEach(([a, b]) => edges.push([a, b, -1]));
+        else edges.push([part.a, part.b, -1]);
+      }
+      const candidate = parallelEdgeSnap(moving, edges, threshold, 'wall');
+      if (candidate) candidates.push(candidate);
+    }
+    if (options.align) {
+      const candidate = alignmentSnap(item, options.otherItems || [], threshold);
       if (candidate) candidates.push(candidate);
     }
     if (options.furniture) {
@@ -272,9 +283,9 @@
     }
     candidates.sort((a, b) => a.magnitude - b.magnitude);
     const best = candidates[0];
-    return best
-      ? { x: item.x + best.delta.x, y: item.y + best.delta.y, snapped: true, guides: [best.guide], type: best.guide.type }
-      : { x: item.x, y: item.y, snapped: false, guides: [] };
+    if (!best) return { x: item.x, y: item.y, snapped: false, guides: [] };
+    const guides = best.guides || [best.guide];
+    return { x: item.x + best.delta.x, y: item.y + best.delta.y, snapped: true, guides, type: guides[0].type };
   }
 
   function analyzePlacement(item, otherItems, geometry, options = {}) {
@@ -286,8 +297,18 @@
       }
     }
     const vertices = geometry?.vertices || [];
-    if (geometry?.closed && vertices.length >= 3 && !polygonContainsPolygon(vertices, itemPolygon)) {
+    // 0,5 mm tolerance: furniture placed flush against a wall must not be reported as outside.
+    if (geometry?.closed && vertices.length >= 3 && !polygonContainsPolygon(vertices, rotatedRectCorners(item, -0.05))) {
       warnings.push({ type: 'boundary' });
+    }
+    for (const part of geometry?.partitions || []) {
+      const block = part.thickness ? partitionPolygon(part) : null;
+      const hit = block
+        ? convexPolygonsOverlap(rotatedRectCorners(item, -0.05), block)
+        : polygonEdges(itemPolygon).some(([a, b]) => segmentsIntersect(a, b, part.a, part.b, false)) || pointInPolygon(part.a, itemPolygon, false);
+      if (hit) {
+        warnings.push({ type: 'partition', id: part.id });
+      }
     }
     for (const object of geometry?.objects || []) {
       if (object.type === 'door' && convexPolygonsOverlap(itemPolygon, doorClearancePolygon(object, vertices))) {
@@ -304,6 +325,219 @@
       }
     }
     return warnings;
+  }
+
+
+  /** Rectangle of a free-standing wall element (pillar, fireplace) with its own thickness. */
+  function partitionPolygon(part, defaultThickness = 10) {
+    const length = distance(part.a, part.b);
+    const half = (Number(part.thickness) || defaultThickness) / 2;
+    if (length < EPSILON) return [];
+    const n = { x: -(part.b.y - part.a.y) / length * half, y: (part.b.x - part.a.x) / length * half };
+    return [add(part.a, n), add(part.b, n), subtract(part.b, n), subtract(part.a, n)];
+  }
+
+  function itemCenter(item) {
+    const angle = rad(item.rot);
+    return add({ x: Number(item.x), y: Number(item.y) }, rotateVector({ x: Number(item.w) / 2, y: Number(item.h) / 2 }, angle));
+  }
+
+  /** Returns the corner position that keeps the item's centre fixed at `center`. */
+  function cornerForCenter(item, center, rotation = item.rot) {
+    const offset = rotateVector({ x: Number(item.w) / 2, y: Number(item.h) / 2 }, rad(rotation));
+    return { x: center.x - offset.x, y: center.y - offset.y };
+  }
+
+  /** Rotates an item around its centre (UI convention), returning the new {x, y, rot}. */
+  function rotateAboutCenter(item, rotation) {
+    const center = itemCenter(item);
+    const normalized = ((Number(rotation) % 360) + 360) % 360;
+    const corner = cornerForCenter(item, center, normalized);
+    return { x: corner.x, y: corner.y, rot: normalized };
+  }
+
+  /** Resizes an item keeping its centre fixed. */
+  function resizeAboutCenter(item, width, depth) {
+    const center = itemCenter(item);
+    const next = { ...item, w: Number(width), h: Number(depth) };
+    return { ...cornerForCenter(next, center), w: next.w, h: next.h };
+  }
+
+  function signedArea(polygon) {
+    let total = 0;
+    for (const [a, b] of polygonEdges(polygon)) total += cross(a, b);
+    return total / 2;
+  }
+
+  function polygonArea(polygon) {
+    return Math.abs(signedArea(polygon || []));
+  }
+
+  function polygonBounds(points) {
+    return (points || []).reduce((value, point) => ({
+      minX: Math.min(value.minX, point.x), minY: Math.min(value.minY, point.y),
+      maxX: Math.max(value.maxX, point.x), maxY: Math.max(value.maxY, point.y)
+    }), { minX: Infinity, minY: Infinity, maxX: -Infinity, maxY: -Infinity });
+  }
+
+  function polygonPerimeter(polygon) {
+    return polygonEdges(polygon).reduce((sum, [a, b]) => sum + distance(a, b), 0);
+  }
+
+  function lineIntersection(p, r, q, s) {
+    const denominator = cross(r, s);
+    if (Math.abs(denominator) < EPSILON) return null;
+    const t = cross(subtract(q, p), s) / denominator;
+    return add(p, multiply(r, t));
+  }
+
+  /**
+   * Offsets a closed polygon outward by `amount` (mitred corners, limited).
+   * Returns vertices in the same order as the input.
+   */
+  function offsetPolygonOutward(polygon, amount, miterLimit = 4) {
+    const n = polygon.length;
+    if (n < 3) return polygon.map(point => ({ ...point }));
+    const orientationSign = signedArea(polygon) > 0 ? 1 : -1;
+    // For positive signed area in a y-down frame, the outward normal of edge (a→b) is (dy, -dx) * -1 … compute via probe instead.
+    const normals = [];
+    for (let index = 0; index < n; index += 1) {
+      const a = polygon[index];
+      const b = polygon[(index + 1) % n];
+      const tangent = unit(subtract(b, a));
+      let normal = { x: tangent.y, y: -tangent.x };
+      if (orientationSign < 0) normal = multiply(normal, -1);
+      normals.push({ tangent, normal });
+    }
+    // Validate direction with a probe on the longest edge.
+    let longest = 0;
+    for (let index = 1; index < n; index += 1) {
+      if (distance(polygon[index], polygon[(index + 1) % n]) > distance(polygon[longest], polygon[(longest + 1) % n])) longest = index;
+    }
+    const mid = multiply(add(polygon[longest], polygon[(longest + 1) % n]), 0.5);
+    const probe = add(mid, multiply(normals[longest].normal, 0.5));
+    if (pointInPolygon(probe, polygon, false)) normals.forEach(value => { value.normal = multiply(value.normal, -1); });
+    const result = [];
+    for (let index = 0; index < n; index += 1) {
+      const previous = normals[(index - 1 + n) % n];
+      const current = normals[index];
+      const point = polygon[index];
+      const p1 = add(point, multiply(previous.normal, amount));
+      const p2 = add(point, multiply(current.normal, amount));
+      const hitPoint = lineIntersection(p1, previous.tangent, p2, current.tangent);
+      if (!hitPoint || distance(hitPoint, point) > Math.abs(amount) * miterLimit) {
+        result.push(add(point, multiply(unit(add(previous.normal, current.normal)), amount)));
+      } else result.push(hitPoint);
+    }
+    return result;
+  }
+
+  /** Distance along a ray to the nearest segment (or Infinity). */
+  function rayDistance(origin, direction, segments) {
+    const dir = unit(direction);
+    let best = Infinity;
+    let bestPoint = null;
+    for (const [a, b] of segments) {
+      const s = subtract(b, a);
+      const denominator = cross(dir, s);
+      if (Math.abs(denominator) < EPSILON) continue;
+      const qp = subtract(a, origin);
+      const t = cross(qp, s) / denominator;
+      const u = cross(qp, dir) / denominator;
+      if (t > EPSILON && u >= -EPSILON && u <= 1 + EPSILON && t < best) {
+        best = t;
+        bestPoint = add(origin, multiply(dir, t));
+      }
+    }
+    return { distance: best, point: bestPoint };
+  }
+
+  /**
+   * Measures free distance from the middle of each item side, perpendicular to that
+   * side, to the nearest wall/partition. Used for live placement read-outs.
+   */
+  function wallClearances(item, segments) {
+    const corners = rotatedRectCorners(item);
+    const sides = [
+      { name: 'top', a: corners[0], b: corners[1] },
+      { name: 'right', a: corners[1], b: corners[2] },
+      { name: 'bottom', a: corners[2], b: corners[3] },
+      { name: 'left', a: corners[3], b: corners[0] }
+    ];
+    const center = itemCenter(item);
+    return sides.map(side => {
+      const midpoint = multiply(add(side.a, side.b), 0.5);
+      const direction = unit(subtract(midpoint, center));
+      const hitValue = rayDistance(midpoint, direction, segments);
+      return { side: side.name, from: midpoint, to: hitValue.point, distance: hitValue.distance };
+    });
+  }
+
+  function itemBounds(item) {
+    return polygonBounds(rotatedRectCorners(item));
+  }
+
+  /**
+   * Smart alignment guides: aligns the moving item's bounding-box edges or centre
+   * with other items' edges or centres along x and y independently.
+   */
+  function alignmentSnap(item, others, threshold) {
+    const box = itemBounds(item);
+    const mine = {
+      x: [box.minX, (box.minX + box.maxX) / 2, box.maxX],
+      y: [box.minY, (box.minY + box.maxY) / 2, box.maxY]
+    };
+    let bestX = null;
+    let bestY = null;
+    for (const other of others || []) {
+      if (other.id === item.id) continue;
+      const target = itemBounds(other);
+      const theirs = {
+        x: [target.minX, (target.minX + target.maxX) / 2, target.maxX],
+        y: [target.minY, (target.minY + target.maxY) / 2, target.maxY]
+      };
+      for (let i = 0; i < 3; i += 1) {
+        for (let j = 0; j < 3; j += 1) {
+          // Only align like-for-like (edge↔edge, centre↔centre) to avoid noisy guides.
+          if ((i === 1) !== (j === 1)) continue;
+          const dx = theirs.x[j] - mine.x[i];
+          if (Math.abs(dx) <= threshold && (!bestX || Math.abs(dx) < Math.abs(bestX.delta))) {
+            bestX = { delta: dx, value: theirs.x[j], span: [Math.min(box.minY, target.minY), Math.max(box.maxY, target.maxY)] };
+          }
+          const dy = theirs.y[j] - mine.y[i];
+          if (Math.abs(dy) <= threshold && (!bestY || Math.abs(dy) < Math.abs(bestY.delta))) {
+            bestY = { delta: dy, value: theirs.y[j], span: [Math.min(box.minX, target.minX), Math.max(box.maxX, target.maxX)] };
+          }
+        }
+      }
+    }
+    if (!bestX && !bestY) return null;
+    const delta = { x: bestX ? bestX.delta : 0, y: bestY ? bestY.delta : 0 };
+    const guides = [];
+    if (bestX) guides.push({ type: 'align', a: { x: bestX.value, y: bestX.span[0] }, b: { x: bestX.value, y: bestX.span[1] } });
+    if (bestY) guides.push({ type: 'align', a: { x: bestY.span[0], y: bestY.value }, b: { x: bestY.span[1], y: bestY.value } });
+    // Alignment is preferred over grid when within threshold: scale magnitude down slightly.
+    return { delta, magnitude: Math.hypot(delta.x, delta.y) * 0.9, guide: guides[0], guides };
+  }
+
+  /** Moves an item flush against the nearest wall behind it (its local top side). */
+  function pushToWall(item, segments, gap = 0) {
+    const clearances = wallClearances(item, segments);
+    const back = clearances.find(value => value.side === 'top');
+    if (!back || !Number.isFinite(back.distance)) return null;
+    const direction = unit(subtract(back.from, itemCenter(item)));
+    const move = back.distance - gap;
+    return { x: item.x + direction.x * move, y: item.y + direction.y * move };
+  }
+
+  function wallSegments(geometry) {
+    if (!geometry) return [];
+    const segments = polygonEdges(geometry.vertices || [], geometry.closed !== false).map(([a, b]) => [a, b]);
+    for (const part of geometry.partitions || []) {
+      if (part.thickness) polygonEdges(partitionPolygon(part)).forEach(([a, b]) => segments.push([a, b]));
+      else segments.push([part.a, part.b]);
+    }
+    return segments;
   }
 
   return Object.freeze({
@@ -327,6 +561,22 @@
     doorClearancePolygon,
     radiatorPolygon,
     snapFurniture,
-    analyzePlacement
+    analyzePlacement,
+    partitionPolygon,
+    itemCenter,
+    cornerForCenter,
+    rotateAboutCenter,
+    resizeAboutCenter,
+    signedArea,
+    polygonArea,
+    polygonBounds,
+    polygonPerimeter,
+    offsetPolygonOutward,
+    rayDistance,
+    wallClearances,
+    itemBounds,
+    alignmentSnap,
+    pushToWall,
+    wallSegments
   });
 });

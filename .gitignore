@@ -1,0 +1,5 @@
+.env
+.env.*
+apikey.md
+node_modules/
+.vercel/

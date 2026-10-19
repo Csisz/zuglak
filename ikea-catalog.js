@@ -83,6 +83,19 @@
       productUrl: 'https://www.ikea.com/hu/hu/p/malm-agykeret-magas-feher-s09929373/'
     },
     {
+      // Checked on the IKEA Hungary product page on 2026-10-17: 165 cm long,
+      // 75 cm wide, headboard 68 cm (footboard 48 cm); mattress 70 × 160 cm.
+      name: 'KRITTER ágykeret ágyráccsal, 70 × 160',
+      productId: '691.854.35',
+      category: 'beds',
+      type: 'bed',
+      width: 75,
+      depth: 165,
+      height: 68,
+      verifiedAt: '2026-10-17',
+      productUrl: 'https://www.ikea.com/hu/hu/p/kritter-agykeret-agyraccsal-feher-s69185435/'
+    },
+    {
       name: 'LISABO asztal',
       productId: '702.943.39',
       category: 'tables',

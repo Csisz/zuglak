@@ -84,9 +84,9 @@ test('legacy v1 plan data migrates without losing existing room content', () => 
       room3: { active: 'Alap', variants: { Alap: { items: [] } } }
     }
   };
-  const storage = new MemoryStorage({ [Core.PLAN_STORAGE_KEY]: JSON.stringify(legacy) });
+  const storage = new MemoryStorage({ [Core.LEGACY_PLAN_STORAGE_KEY]: JSON.stringify(legacy) });
   const loaded = Core.loadPlan(storage, () => ({ fallback: true }), ['room1', 'room2', 'room3']);
-  assert.equal(loaded.version, 2);
+  assert.equal(loaded.version, 3);
   assert.equal(loaded.currentRoom, 'room2');
   assert.equal(loaded.rooms.room2.variants.Alap.items[0].id, 'kept');
   assert.deepEqual(loaded.rooms.room2.geometries, []);
@@ -103,10 +103,10 @@ test('legacy data still loads when browser quota prevents writing the migration 
       room3: { active: 'Alap', variants: { Alap: { items: [] } } }
     }
   };
-  const storage = new MemoryStorage({ [Core.PLAN_STORAGE_KEY]: JSON.stringify(legacy) });
+  const storage = new MemoryStorage({ [Core.LEGACY_PLAN_STORAGE_KEY]: JSON.stringify(legacy) });
   storage.setItem = () => { throw new DOMException('Quota exceeded', 'QuotaExceededError'); };
   const loaded = Core.loadPlan(storage, () => ({ fallback: true }), ['room1', 'room2', 'room3']);
-  assert.equal(loaded.version, 2);
+  assert.equal(loaded.version, 3);
   assert.equal(loaded.rooms.room1.variants.Alap.items[0].id, 'safe');
 });
 
@@ -123,9 +123,14 @@ test('v2 plan geometry survives saving and loading without changing user coordin
       room3: { active: 'Alap', variants: { Alap: { items: [] } } }
     }
   };
-  const storage = new MemoryStorage({ [Core.PLAN_STORAGE_KEY]: JSON.stringify(plan) });
+  const storage = new MemoryStorage({ [Core.LEGACY_PLAN_STORAGE_KEY]: JSON.stringify(plan) });
   const loaded = Core.loadPlan(storage, () => plan, ['room1', 'room2', 'room3']);
-  assert.deepEqual(loaded.rooms.room1.geometries[0], plan.rooms.room1.geometries[0]);
+  const geometry = loaded.rooms.room1.geometries[0];
+  assert.deepEqual(geometry.vertices, plan.rooms.room1.geometries[0].vertices);
+  assert.deepEqual(geometry.objects, plan.rooms.room1.geometries[0].objects);
+  assert.deepEqual(geometry.confirmedWalls, plan.rooms.room1.geometries[0].confirmedWalls);
+  // The 1.x key is read but never overwritten during migration.
+  assert.equal(storage.getItem(Core.LEGACY_PLAN_STORAGE_KEY), JSON.stringify(plan));
   assert.equal(storage.getItem(Core.LEGACY_BACKUP_KEY), null);
 });
 

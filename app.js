@@ -1,1381 +1,1564 @@
-/* Zuglak Studio 1.6 Visual Edition: offline, local-first smart 2D room planner. */
+/* Zuglak Studio 2.0 – application controller: state, history, 2D editor, panels and exports. */
 (() => {
   'use strict';
 
   const Core = window.ZuglakCore;
   const Geometry = window.ZuglakGeometry;
+  const Catalog = window.ZuglakCatalog;
+  const Materials = window.ZuglakMaterials;
+  const Floorplans = window.ZuglakFloorplans;
+  const Art = window.ZuglakFurniture2D;
+  const Pdf = window.ZuglakPdf;
+  const Icons = window.ZuglakIcons;
   const Ikea = window.ZUGLAK_IKEA_CATALOG;
-  if (!Core || !Geometry || !Ikea) throw new Error('A Zuglak adatmoduljai nem töltődtek be.');
+  if (!Core || !Geometry || !Catalog || !Materials || !Floorplans || !Art) throw new Error('A Zuglak modulok nem töltődtek be.');
 
-  // The reference points belong to known-length segments in the original images.
-  const ORIGINAL_PLANS = [
-    { id: 'room1', name: '1. szoba – lépcsőzetes alaprajz', url: 'assets/alaprajz-1.png', pxPerCm: 884 / 440, reference: { x1: 83, y1: 1141, x2: 967, y2: 1141, cm: 440, label: 'Alsó fal · 440 cm' } },
-    { id: 'room2', name: '2. szoba – tagolt alaprajz', url: 'assets/alaprajz-2.png', pxPerCm: 219 / 102, reference: { x1: 119, y1: 232, x2: 338, y2: 232, cm: 102, label: 'Bal felső szakasz · 102 cm' } },
-    { id: 'room3', name: '3. szoba – keskeny alaprajz', url: 'assets/alaprajz-3.png', pxPerCm: 126 / 20, reference: { x1: 226, y1: 90, x2: 352, y2: 90, cm: 20, label: 'Bal felső szakasz · 20 cm' } }
-  ];
-
-  const BASIC_CATALOG = [
-    ['sofa', 'Kanapé', 220, 95], ['armchair', 'Fotel', 82, 86], ['bed', 'Ágy', 180, 200],
-    ['table', 'Étkezőasztal', 160, 90], ['chair', 'Szék', 46, 50], ['wardrobe', 'Szekrény', 180, 60],
-    ['dresser', 'Komód', 120, 45], ['rug', 'Szőnyeg', 200, 140], ['desk', 'Íróasztal', 120, 60],
-    ['coffee', 'Dohányzóasztal', 110, 60], ['plant', 'Növény', 42, 42], ['lamp', 'Állólámpa', 36, 36], ['shelf', 'Polc', 100, 34],
-    ['tv', 'TV', 120, 15], ['stool', 'Hokedli', 38, 38], ['bath', 'Fürdőkád', 170, 75], ['sink', 'Mosdó', 55, 45]
-  ].map(([type, name, width, depth]) => ({ type, name, width, depth, category: 'basic' }));
-
+  // ------------------------------------------------------------------ helpers
   const $ = id => document.getElementById(id);
-  const canvas = $('stage');
-  const wrap = $('stageWrap');
-  let ctx = canvas.getContext('2d');
-  const emptyVariant = () => ({ items: [] });
+  const clamp = (value, min, max) => Math.max(min, Math.min(max, value));
+  const rad = degrees => degrees * Math.PI / 180;
+  const idFactory = () => (crypto.randomUUID ? crypto.randomUUID() : `i${Date.now()}${Math.random().toString(36).slice(2)}`);
+  const fmt = (value, digits = 1) => Number(value).toLocaleString('hu-HU', { maximumFractionDigits: digits });
+  const fmtCm = value => `${fmt(value)} cm`;
+  const escapeHtml = value => String(value ?? '').replace(/[&<>"']/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[ch]);
+  const icon = (name, cls) => Icons.svg(name, cls);
+  const dateLabel = value => new Date(value).toLocaleString('hu-HU', { year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+  // Plan data must contain the three original rooms; newer rooms are added during migration.
+  const REQUIRED = Floorplans.legacyIds;
+
+  // ------------------------------------------------------------------ data
   const defaults = () => ({
     version: Core.CURRENT_PLAN_VERSION,
     currentRoom: 'room1',
     customPlans: [],
-    rooms: Object.fromEntries(ORIGINAL_PLANS.map(plan => [plan.id, {
+    rooms: Object.fromEntries(Floorplans.plans.map(plan => [plan.id, {
       name: plan.name,
       pxPerCm: plan.pxPerCm,
       active: 'Alap',
-      variants: { Alap: emptyVariant() },
+      variants: { Alap: { items: [], materials: { floor: Core.DEFAULT_FLOOR, walls: Core.DEFAULT_WALL }, versions: [] } },
       geometries: [],
       activeGeometryId: null
     }]))
   });
-
-  let data = Core.loadPlan(localStorage, defaults, ORIGINAL_PLANS.map(plan => plan.id));
-  data.customPlans = Array.isArray(data.customPlans) ? data.customPlans : [];
+  const migrateOptions = { floorplans: Floorplans, idFactory };
+  let data = Core.loadPlan(localStorage, defaults, REQUIRED, migrateOptions);
   let favorites = Core.loadFavorites(localStorage);
-  let image = null;
-  let roomId = data.currentRoom && data.rooms[data.currentRoom] ? data.currentRoom : 'room1';
-  let selected = null;
-  let mode = 'select';
-  let view = { x: 0, y: 0, z: 1 };
-  let drag = null;
-  let lineStart = null;
-  let lineEnd = null;
-  let spaceDown = false;
-  let statusTimeout = null;
+
+  // ------------------------------------------------------------------ UI state
+  const ui = {
+    roomId: data.rooms[data.currentRoom] ? data.currentRoom : 'room1',
+    view: '2d',
+    tool: 'select',
+    mode: 'furnish', // furnish | walls | openings | draw | calibrate
+    openingTool: null,
+    selectedId: null,
+    selectedObjectId: null,
+    selectedVertex: null,
+    selectedWall: null,
+    leftTab: 'catalog',
+    catalogSource: 'all',
+    catalogCategory: 'all',
+    clearance: 0,
+    presentation: false,
+    cutaway: false,
+    lampsOn: true,
+    sunAzimuth: 225,
+    ao: true,
+    camera: 'bird',
+    view2d: { x: 0, y: 0, z: 1 },
+    guides: [],
+    measure: null,
+    calibration: null,
+    hoverId: null,
+    cursor: null,
+    exportKind: 'png2d'
+  };
+  const prefsKey = 'zuglak-ui-v2';
+  try { Object.assign(ui, JSON.parse(localStorage.getItem(prefsKey) || '{}').ui || {}); } catch { /* ignore */ }
+  ui.mode = 'furnish'; ui.presentation = false; ui.selectedId = null; ui.measure = null;
+  if (!data.rooms[ui.roomId]) ui.roomId = 'room1';
+
+  const allPlans = () => [...Floorplans.plans, ...(data.customPlans || []).map(plan => ({ ...plan, isCustom: true }))];
+  const planFor = id => allPlans().find(plan => plan.id === id) || Floorplans.plans[0];
+  const room = () => data.rooms[ui.roomId];
+  const variant = () => room().variants[room().active];
+  const items = () => variant().items;
+  const geometries = () => room().geometries || (room().geometries = []);
+  const geometry = () => geometries().find(value => value.id === room().activeGeometryId) || null;
+  const selectedItem = () => items().find(item => item.id === ui.selectedId) || null;
+  const roomMaterials = () => variant().materials || (variant().materials = { floor: Core.DEFAULT_FLOOR, walls: Core.DEFAULT_WALL });
+  const thickness = () => Number(room().wallThickness) || Core.DEFAULT_WALL_THICKNESS;
+  const archEditing = () => ['walls', 'openings', 'draw', 'calibrate'].includes(ui.mode);
+
+  function savePrefs() {
+    const keep = ['view', 'leftTab', 'catalogSource', 'cutaway', 'lampsOn', 'sunAzimuth', 'ao', 'camera', 'clearance'];
+    const layers = ['showDims', 'showItemDims', 'showLabels', 'showUnderlay', 'showGrid', 'darkWalls', 'snapWalls', 'snapFurniture', 'snapAlign', 'snapGrid', 'snapRotation'];
+    try {
+      localStorage.setItem(prefsKey, JSON.stringify({
+        ui: Object.fromEntries(keep.map(key => [key, ui[key]])),
+        layers: Object.fromEntries(layers.map(id => [id, $(id)?.checked])),
+        snap: $('snap').getAttribute('aria-pressed') === 'true'
+      }));
+    } catch { /* ignore */ }
+  }
+
+  // ------------------------------------------------------------------ history & persistence
   let history = [];
   let future = [];
-  let lastSnapshot = JSON.stringify(data);
-  let snapEnabled = false;
-  let catalogTab = 'ikea';
-  let resolvedImport = null;
-  let selectedVertex = null;
-  let selectedArchitecture = null;
-  let openingTool = null;
-  let snapGuides = [];
-  let warningItemIds = new Set();
-  let lastMeasurement = null;
+  let committed = JSON.stringify(data);
+  let lastCommit = { label: '', time: 0 };
 
-  const allPlans = () => [...ORIGINAL_PLANS, ...data.customPlans];
-  const room = () => data.rooms[roomId];
-  const items = () => room().variants[room().active].items;
-  const plan = () => allPlans().find(value => value.id === roomId) || ORIGINAL_PLANS[0];
-  const scale = () => room().pxPerCm;
-  const geometries = () => room().geometries || (room().geometries = []);
-  const activeGeometry = () => geometries().find(value => value.id === room().activeGeometryId) || null;
-  const pointToCm = point => Geometry.pixelToCm(point, scale());
-  const pointToWorld = point => Geometry.cmToPixel(point, scale());
-  const itemToCm = item => ({ ...item, x: item.x / scale(), y: item.y / scale() });
-  const idFactory = () => crypto.randomUUID ? crypto.randomUUID() : `i${Date.now()}${Math.random()}`;
-  const clamp = (value, min, max) => Math.max(min, Math.min(max, value));
-  const rad = degrees => degrees * Math.PI / 180;
-  const productTypeForCategory = category => ({
-    sofas: 'sofa', wardrobes: 'wardrobe', beds: 'bed', tables: 'table', chairs: 'chair', storage: 'shelf'
-  })[category] || 'custom';
+  function persist(snapshot) {
+    try {
+      localStorage.setItem(Core.PLAN_STORAGE_KEY, snapshot);
+      setSaveState(true);
+      return true;
+    } catch {
+      setSaveState(false);
+      toast('A mentés nem sikerült: a böngésző tárhelye megtelt. Készíts JSON-mentést.', 8000);
+      return false;
+    }
+  }
+
+  function setSaveState(ok) {
+    const node = $('saveState');
+    node.classList.toggle('error', !ok);
+    node.querySelector('span').textContent = ok ? 'Mentve' : 'Mentési hiba';
+  }
+
+  /** Records the current state as one undoable step and saves it. */
+  function commit(label = '', options = {}) {
+    data.currentRoom = ui.roomId;
+    const snapshot = JSON.stringify(data);
+    if (snapshot === committed) return;
+    const now = Date.now();
+    const merge = options.merge && lastCommit.label === label && now - lastCommit.time < 1200;
+    if (!merge) {
+      history.push(committed);
+      if (history.length > 120) history.shift();
+    }
+    future = [];
+    committed = snapshot;
+    lastCommit = { label, time: now };
+    persist(snapshot);
+    updateHistoryButtons();
+    invalidateThumbs();
+  }
+
+  function restore(snapshot) {
+    data = JSON.parse(snapshot);
+    committed = snapshot;
+    if (!data.rooms[data.currentRoom]) data.currentRoom = 'room1';
+    const roomChanged = ui.roomId !== data.currentRoom;
+    ui.roomId = data.currentRoom;
+    if (!items().some(item => item.id === ui.selectedId)) ui.selectedId = null;
+    ui.selectedObjectId = null; ui.selectedVertex = null; ui.selectedWall = null;
+    persist(snapshot);
+    updateHistoryButtons();
+    invalidateThumbs();
+    if (roomChanged) fitView();
+    refreshAll();
+  }
+
+  function undo() {
+    if (!history.length) return;
+    future.push(committed);
+    restore(history.pop());
+    toast('Visszavonva');
+  }
+
+  function redo() {
+    if (!future.length) return;
+    history.push(committed);
+    restore(future.pop());
+    toast('Újra végrehajtva');
+  }
 
   function updateHistoryButtons() {
     $('undo').disabled = !history.length;
     $('redo').disabled = !future.length;
   }
 
-  function restoreSnapshot(snapshot) {
-    data = JSON.parse(snapshot);
-    data.customPlans = Array.isArray(data.customPlans) ? data.customPlans : [];
-    roomId = data.currentRoom && data.rooms[data.currentRoom] ? data.currentRoom : 'room1';
-    selected = null;
-    selectedVertex = null;
-    selectedArchitecture = null;
-    snapGuides = [];
-    lastSnapshot = snapshot;
-    localStorage.setItem(Core.PLAN_STORAGE_KEY, snapshot);
-    openRoom(roomId, false);
-    updateHistoryButtons();
+  let toastTimer = null;
+  function toast(text, duration = 2600) {
+    const node = $('toast');
+    node.textContent = text;
+    node.classList.add('show');
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => node.classList.remove('show'), duration);
   }
 
-  function undo() {
-    if (!history.length) return;
-    future.push(JSON.stringify(data));
-    restoreSnapshot(history.pop());
-    flash('Visszavonva');
-  }
-
-  function redo() {
-    if (!future.length) return;
-    history.push(JSON.stringify(data));
-    restoreSnapshot(future.pop());
-    flash('Újra végrehajtva');
-  }
-
-  function save(trackHistory = true) {
-    const snapshot = JSON.stringify(data);
-    if (trackHistory && snapshot !== lastSnapshot) {
-      history.push(lastSnapshot);
-      if (history.length > 60) history.shift();
-      future = [];
-      updateHistoryButtons();
+  // ------------------------------------------------------------------ underlay images
+  const imageCache = new Map();
+  function imageFor(url) {
+    if (!imageCache.has(url)) {
+      const image = new Image();
+      image.onload = () => requestRender();
+      image.src = url;
+      imageCache.set(url, image);
     }
+    const image = imageCache.get(url);
+    return image.complete && image.naturalWidth ? image : null;
+  }
+
+  function planImage(id = ui.roomId) {
+    const plan = planFor(id);
+    if (!plan?.url) return null;
+    if (!imageCache.has(plan.url)) {
+      const image = new Image();
+      image.onload = () => { requestRender(); renderRoomMenu(); };
+      image.src = plan.url;
+      imageCache.set(plan.url, image);
+    }
+    const image = imageCache.get(plan.url);
+    return image.complete && image.naturalWidth ? image : null;
+  }
+
+  // ------------------------------------------------------------------ plan geometry helpers
+  function roomBounds(geom = geometry(), roomData = room()) {
+    if (geom && geom.vertices.length >= 2) {
+      const outer = geom.closed && geom.vertices.length >= 3 ? Geometry.offsetPolygonOutward(geom.vertices, Number(roomData.wallThickness) || Core.DEFAULT_WALL_THICKNESS) : geom.vertices;
+      return Geometry.polygonBounds(outer);
+    }
+    const plan = planFor(ui.roomId);
+    const scale = Number(roomData.pxPerCm) || 2;
+    const size = plan.imageSize || { width: 1122, height: 1402 };
+    return { minX: 0, minY: 0, maxX: size.width / scale, maxY: size.height / scale };
+  }
+
+  function interiorBounds(geom = geometry()) {
+    return geom && geom.vertices.length ? Geometry.polygonBounds(geom.vertices) : roomBounds();
+  }
+
+  /** Splits each wall edge into solid pieces and openings (shared idea with the 3D builder). */
+  function wallPieces(geom, index) {
+    const a = geom.vertices[index];
+    const b = geom.vertices[(index + 1) % geom.vertices.length];
+    const length = Geometry.distance(a, b);
+    const objects = (geom.objects || []).filter(object => object.wallIndex === index && object.type !== 'radiator').map(object => {
+      const width = object.fullWall ? length : Number(object.width) || 0;
+      const offset = object.fullWall ? length / 2 : Number(object.offset) || 0;
+      return { object, t0: clamp(offset - width / 2, 0, length), t1: clamp(offset + width / 2, 0, length) };
+    }).filter(value => value.t1 - value.t0 > 0.3).sort((p, q) => p.t0 - q.t0);
+    const pieces = [];
+    let cursor = 0;
+    for (const value of objects) {
+      if (value.t0 > cursor + 0.2) pieces.push({ type: 'solid', t0: cursor, t1: value.t0 });
+      pieces.push({ type: value.object.type, t0: value.t0, t1: value.t1, object: value.object });
+      cursor = Math.max(cursor, value.t1);
+    }
+    if (length > cursor + 0.2) pieces.push({ type: 'solid', t0: cursor, t1: length });
+    return { a, b, length, pieces };
+  }
+
+  function edgeFrame(geom, outer, index) {
+    const a = geom.vertices[index];
+    const b = geom.vertices[(index + 1) % geom.vertices.length];
+    const length = Geometry.distance(a, b) || 1;
+    const tangent = { x: (b.x - a.x) / length, y: (b.y - a.y) / length };
+    const outA = outer[index];
+    const outB = outer[(index + 1) % outer.length];
+    const mid = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
+    const outMid = { x: (outA.x + outB.x) / 2, y: (outA.y + outB.y) / 2 };
+    const nl = Math.hypot(outMid.x - mid.x, outMid.y - mid.y) || 1;
+    const normal = { x: (outMid.x - mid.x) / nl, y: (outMid.y - mid.y) / nl };
+    const t = thicknessOf(geom);
+    const at = s => ({ x: a.x + tangent.x * s, y: a.y + tangent.y * s });
+    const outAt = s => (s <= 0.001 ? outA : s >= length - 0.001 ? outB : { x: a.x + tangent.x * s + normal.x * t, y: a.y + tangent.y * s + normal.y * t });
+    return { a, b, length, tangent, normal, at, outAt, outA, outB };
+  }
+  let thicknessOverride = null;
+  const thicknessOf = () => thicknessOverride ?? thickness();
+
+  // ------------------------------------------------------------------ 2D rendering
+  const canvas = $('plan');
+  const screenCtx = canvas.getContext('2d');
+
+  function layer(id) { return Boolean($(id)?.checked); }
+
+  function drawPlan(ctx, T, options = {}) {
+    // T: { x, y, z, dpr } — screen = (cm * z + x) * dpr
+    const roomData = options.room || room();
+    const variantData = options.variant || variant();
+    const geom = options.geometry !== undefined ? options.geometry : geometry();
+    const list = variantData.items;
+    const z = T.z;
+    const px = 1 / z; // one screen pixel in cm
+    const dark = options.darkWalls ?? layer('darkWalls');
+    const wallThickness = Number(roomData.wallThickness) || Core.DEFAULT_WALL_THICKNESS;
+    thicknessOverride = wallThickness;
+    const floorMat = Materials.get(variantData.materials?.floor || Core.DEFAULT_FLOOR);
+    const setWorld = () => ctx.setTransform(T.dpr * z, 0, 0, T.dpr * z, T.dpr * T.x, T.dpr * T.y);
+    const setScreen = () => ctx.setTransform(T.dpr, 0, 0, T.dpr, 0, 0);
+    const fontPx = size => `${size * px}px Inter, system-ui, sans-serif`;
+
+    // Background
+    setScreen();
+    if (options.background !== null) {
+      ctx.fillStyle = options.background || '#f3efe8';
+      ctx.fillRect(0, 0, T.width, T.height);
+    } else ctx.clearRect(0, 0, T.width, T.height);
+    if (options.grid ?? (layer('showGrid') && !ui.presentation)) {
+      const step = z > 1.6 ? 10 : z > 0.5 ? 50 : 100;
+      const major = step * (step === 10 ? 10 : 2);
+      const x0 = Math.floor((-T.x / z) / step) * step;
+      const y0 = Math.floor((-T.y / z) / step) * step;
+      const x1 = (T.width - T.x) / z; const y1 = (T.height - T.y) / z;
+      ctx.lineWidth = 1;
+      for (let x = x0; x <= x1; x += step) {
+        ctx.strokeStyle = Math.abs(x % major) < 0.01 ? 'rgba(120,104,82,.10)' : 'rgba(120,104,82,.05)';
+        ctx.beginPath(); ctx.moveTo(Math.round(x * z + T.x) + 0.5, 0); ctx.lineTo(Math.round(x * z + T.x) + 0.5, T.height); ctx.stroke();
+      }
+      for (let y = y0; y <= y1; y += step) {
+        ctx.strokeStyle = Math.abs(y % major) < 0.01 ? 'rgba(120,104,82,.10)' : 'rgba(120,104,82,.05)';
+        ctx.beginPath(); ctx.moveTo(0, Math.round(y * z + T.y) + 0.5); ctx.lineTo(T.width, Math.round(y * z + T.y) + 0.5); ctx.stroke();
+      }
+    }
+    setWorld();
+
+    // Original drawing underlay
+    const geomUnderlay = geom?.underlay;
+    const underlayOn = options.underlay ?? layer('showUnderlay');
+    const underlayImage = underlayOn && geomUnderlay ? imageFor(geomUnderlay.url) : null;
+    if (underlayImage) {
+      ctx.save();
+      ctx.globalAlpha = options.underlayAlpha ?? (archEditing() ? 0.6 : 0.4);
+      const s = 1 / geomUnderlay.pxPerCm;
+      ctx.drawImage(underlayImage, geomUnderlay.x, geomUnderlay.y, underlayImage.naturalWidth * s, underlayImage.naturalHeight * s);
+      ctx.restore();
+    }
+    const image = underlayOn && !geomUnderlay ? planImage(options.roomId || ui.roomId) : null;
+    if (image && Number(roomData.pxPerCm) > 0) {
+      ctx.save();
+      ctx.globalAlpha = options.underlayAlpha ?? (archEditing() ? 0.55 : 0.32);
+      const s = 1 / Number(roomData.pxPerCm);
+      ctx.drawImage(image, 0, 0, image.naturalWidth * s, image.naturalHeight * s);
+      ctx.restore();
+      if (ui.mode === 'calibrate' && options.interactive) {
+        const plan = planFor(ui.roomId);
+        if (plan.reference) {
+          const r = plan.reference;
+          ctx.save(); ctx.strokeStyle = '#c4473b'; ctx.lineWidth = 2 * px; ctx.setLineDash([6 * px, 4 * px]);
+          ctx.beginPath(); ctx.moveTo(r.x1 * s, r.y1 * s); ctx.lineTo(r.x2 * s, r.y2 * s); ctx.stroke(); ctx.restore();
+        }
+      }
+    }
+
+    const closed = geom && geom.closed && geom.vertices.length >= 3;
+    let outer = null;
+    if (closed) {
+      const vertices = geom.vertices;
+      outer = Geometry.offsetPolygonOutward(vertices, wallThickness);
+      const polygonPath = points => { ctx.beginPath(); points.forEach((p, i) => (i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y))); ctx.closePath(); };
+
+      // Floor
+      ctx.save();
+      polygonPath(vertices);
+      ctx.fillStyle = Art.pattern(ctx, floorMat) || floorMat.color;
+      ctx.globalAlpha = archEditing() && options.interactive ? 0.7 : 1;
+      ctx.fill();
+      // Floor through door / passage gaps
+      for (let index = 0; index < vertices.length; index += 1) {
+        const frame = edgeFrame(geom, outer, index);
+        for (const piece of wallPieces(geom, index).pieces) {
+          if (piece.type === 'door' || piece.type === 'opening') {
+            polygonPath([frame.at(piece.t0), frame.at(piece.t1), frame.outAt(piece.t1), frame.outAt(piece.t0)]);
+            ctx.fill();
+          }
+        }
+      }
+      ctx.restore();
+      // Soft ambient shadow along the walls
+      ctx.save();
+      polygonPath(vertices);
+      ctx.clip();
+      ctx.shadowColor = 'rgba(52, 40, 26, .34)';
+      ctx.shadowBlur = 14 * z * T.dpr;
+      ctx.shadowOffsetX = 2 * z * T.dpr;
+      ctx.shadowOffsetY = 3 * z * T.dpr;
+      const ob = Geometry.polygonBounds(outer);
+      ctx.beginPath();
+      ctx.rect(ob.minX - 400, ob.minY - 400, ob.maxX - ob.minX + 800, ob.maxY - ob.minY + 800);
+      vertices.forEach((p, i) => (i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y)));
+      ctx.closePath();
+      ctx.fillStyle = '#000';
+      ctx.fill('evenodd');
+      ctx.restore();
+
+      // Walls
+      const wallFill = dark ? '#3b3834' : '#fbfaf7';
+      const wallLine = dark ? '#2a2825' : '#6f695f';
+      for (let index = 0; index < vertices.length; index += 1) {
+        const frame = edgeFrame(geom, outer, index);
+        const info = wallPieces(geom, index);
+        for (const piece of info.pieces) {
+          const quad = [frame.at(piece.t0), frame.at(piece.t1), frame.outAt(piece.t1), frame.outAt(piece.t0)];
+          if (piece.type === 'solid' || piece.type === 'window') {
+            polygonPath(quad);
+            ctx.fillStyle = piece.type === 'window' ? (dark ? '#5b5751' : '#f1f4f4') : wallFill;
+            ctx.fill();
+            ctx.lineWidth = 1.1 * px; ctx.strokeStyle = wallLine;
+            ctx.beginPath(); ctx.moveTo(quad[0].x, quad[0].y); ctx.lineTo(quad[1].x, quad[1].y); ctx.moveTo(quad[2].x, quad[2].y); ctx.lineTo(quad[3].x, quad[3].y); ctx.stroke();
+          }
+          if (piece.type !== 'solid') {
+            // jambs
+            ctx.lineWidth = 1.1 * px; ctx.strokeStyle = wallLine;
+            ctx.beginPath(); ctx.moveTo(quad[0].x, quad[0].y); ctx.lineTo(quad[3].x, quad[3].y); ctx.moveTo(quad[1].x, quad[1].y); ctx.lineTo(quad[2].x, quad[2].y); ctx.stroke();
+          }
+          if (piece.type === 'window') {
+            const active = piece.object.id === ui.selectedObjectId && options.interactive;
+            for (const f of [0.38, 0.62]) {
+              const p0 = { x: quad[0].x + (quad[3].x - quad[0].x) * f, y: quad[0].y + (quad[3].y - quad[0].y) * f };
+              const p1 = { x: quad[1].x + (quad[2].x - quad[1].x) * f, y: quad[1].y + (quad[2].y - quad[1].y) * f };
+              ctx.beginPath(); ctx.moveTo(p0.x, p0.y); ctx.lineTo(p1.x, p1.y);
+              ctx.strokeStyle = active ? '#1f6f9a' : '#5f8fa6'; ctx.lineWidth = 1.3 * px; ctx.stroke();
+            }
+          }
+          if (piece.type === 'door') {
+            const object = piece.object;
+            const zone = Geometry.doorClearancePolygon(object, vertices);
+            if (zone.length > 2) {
+              const active = object.id === ui.selectedObjectId && options.interactive;
+              ctx.save();
+              ctx.beginPath(); ctx.moveTo(zone[0].x, zone[0].y); zone.slice(1).forEach(p => ctx.lineTo(p.x, p.y)); ctx.closePath();
+              ctx.fillStyle = active ? 'rgba(44,106,93,.12)' : 'rgba(120,100,70,.06)'; ctx.fill();
+              ctx.beginPath(); ctx.moveTo(zone[1].x, zone[1].y); zone.slice(2).forEach(p => ctx.lineTo(p.x, p.y));
+              ctx.setLineDash([5 * px, 4 * px]); ctx.strokeStyle = active ? '#2c6a5d' : '#9b8c78'; ctx.lineWidth = 1 * px; ctx.stroke();
+              ctx.setLineDash([]);
+              const hinge = zone[0]; const open = zone[zone.length - 1];
+              const dx = open.x - hinge.x; const dy = open.y - hinge.y; const len = Math.hypot(dx, dy) || 1;
+              const nx = -dy / len * 2; const ny = dx / len * 2;
+              ctx.beginPath(); ctx.moveTo(hinge.x, hinge.y); ctx.lineTo(open.x, open.y); ctx.lineTo(open.x + nx, open.y + ny); ctx.lineTo(hinge.x + nx, hinge.y + ny); ctx.closePath();
+              ctx.fillStyle = dark ? '#3b3834' : '#fbfaf7'; ctx.fill(); ctx.strokeStyle = active ? '#2c6a5d' : '#6f695f'; ctx.lineWidth = 1.1 * px; ctx.stroke();
+              ctx.restore();
+            }
+          }
+          if (piece.type === 'opening' && options.interactive) {
+            ctx.save(); ctx.setLineDash([4 * px, 4 * px]); ctx.strokeStyle = 'rgba(111,105,95,.5)'; ctx.lineWidth = 1 * px;
+            ctx.beginPath(); ctx.moveTo(quad[0].x, quad[0].y); ctx.lineTo(quad[1].x, quad[1].y); ctx.stroke(); ctx.restore();
+          }
+        }
+        // Radiators
+        for (const object of (geom.objects || []).filter(value => value.wallIndex === index && value.type === 'radiator')) {
+          const polygon = Geometry.radiatorPolygon(object, vertices);
+          if (polygon.length !== 4) continue;
+          const active = object.id === ui.selectedObjectId && options.interactive;
+          polygonPath(polygon);
+          ctx.fillStyle = '#f7f6f3'; ctx.fill(); ctx.strokeStyle = active ? '#2c6a5d' : '#8d867b'; ctx.lineWidth = 1 * px; ctx.stroke();
+          for (let fin = 1; fin < 8; fin += 1) {
+            const r = fin / 8;
+            ctx.beginPath();
+            ctx.moveTo(polygon[0].x + (polygon[1].x - polygon[0].x) * r, polygon[0].y + (polygon[1].y - polygon[0].y) * r);
+            ctx.lineTo(polygon[3].x + (polygon[2].x - polygon[3].x) * r, polygon[3].y + (polygon[2].y - polygon[3].y) * r);
+            ctx.strokeStyle = '#c3bcb1'; ctx.lineWidth = 0.8 * px; ctx.stroke();
+          }
+        }
+      }
+      // Partitions
+      for (const part of geom.partitions || []) {
+        const length = Geometry.distance(part.a, part.b);
+        if (length < 0.5) continue;
+        const partThickness = Number(part.thickness) || wallThickness;
+        const nx = -(part.b.y - part.a.y) / length * partThickness / 2;
+        const ny = (part.b.x - part.a.x) / length * partThickness / 2;
+        polygonPath([{ x: part.a.x + nx, y: part.a.y + ny }, { x: part.b.x + nx, y: part.b.y + ny }, { x: part.b.x - nx, y: part.b.y - ny }, { x: part.a.x - nx, y: part.a.y - ny }]);
+        ctx.fillStyle = wallFill; ctx.fill(); ctx.strokeStyle = wallLine; ctx.lineWidth = 1.1 * px; ctx.stroke();
+      }
+    } else if (geom && geom.vertices.length) {
+      // Open (being drawn) outline
+      ctx.save();
+      ctx.beginPath(); geom.vertices.forEach((p, i) => (i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y)));
+      ctx.strokeStyle = '#2c6a5d'; ctx.lineWidth = 3 * px; ctx.lineJoin = 'round'; ctx.stroke();
+      ctx.restore();
+    }
+
+    // Wall dimensions
+    if (geom && geom.vertices.length >= 2 && (options.dims ?? layer('showDims'))) drawWallDimensions(ctx, geom, outer, px, fontPx, options);
+
+    // Furniture
+    const order = { floor: 0, main: 1, top: 2 };
+    const sorted = [...list].sort((p, q) => (order[Catalog.layerFor(p)] ?? 1) - (order[Catalog.layerFor(q)] ?? 1));
+    const warned = options.warnings || new Set();
+    for (const item of sorted) {
+      ctx.save();
+      ctx.translate(item.x, item.y);
+      ctx.rotate(rad(item.rot || 0));
+      Art.drawItem(ctx, item, { pixelsPerCm: z * T.dpr });
+      if (options.interactive && warned.has(item.id)) {
+        ctx.strokeStyle = 'rgba(176, 71, 58, .9)'; ctx.lineWidth = 2 * px; ctx.setLineDash([5 * px, 3 * px]);
+        ctx.strokeRect(-2 * px, -2 * px, item.w + 4 * px, item.h + 4 * px);
+        ctx.setLineDash([]);
+      }
+      if (options.interactive && ui.hoverId === item.id && ui.selectedId !== item.id) {
+        ctx.strokeStyle = 'rgba(44, 106, 93, .55)'; ctx.lineWidth = 1.5 * px;
+        ctx.strokeRect(-1.5 * px, -1.5 * px, item.w + 3 * px, item.h + 3 * px);
+      }
+      ctx.restore();
+    }
+
+    // Labels / numbers
+    if (options.labels ?? layer('showLabels')) {
+      for (const item of sorted) {
+        if (Catalog.layerFor(item) === 'top' && !options.numbers) continue;
+        const center = Geometry.itemCenter(item);
+        const number = options.numbers?.get(item.id);
+        const text = number ? String(number) : item.name;
+        ctx.font = `600 ${fontPx(number ? 11 : 10.5)}`;
+        const width = ctx.measureText(text).width + 10 * px;
+        const height = (number ? 18 : 17) * px;
+        ctx.fillStyle = number ? 'rgba(35,33,30,.88)' : 'rgba(255,255,255,.88)';
+        ctx.beginPath();
+        if (ctx.roundRect) ctx.roundRect(center.x - Math.max(width, height) / 2, center.y - height / 2, Math.max(width, height), height, height / 2); else ctx.rect(center.x - width / 2, center.y - height / 2, width, height);
+        ctx.fill();
+        ctx.fillStyle = number ? '#fff' : '#23211e'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+        ctx.fillText(text, center.x, center.y + 0.5 * px);
+      }
+    }
+
+    if (!options.interactive) { thicknessOverride = null; return; }
+
+    // Clearance band
+    const selected = selectedItem();
+    if (selected && ui.clearance > 0) {
+      const polygon = Geometry.rotatedRectCorners(selected, ui.clearance);
+      ctx.save();
+      ctx.beginPath(); polygon.forEach((p, i) => (i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y))); ctx.closePath();
+      ctx.fillStyle = 'rgba(63, 130, 170, .07)'; ctx.fill();
+      ctx.setLineDash([6 * px, 4 * px]); ctx.strokeStyle = '#4b88ad'; ctx.lineWidth = 1.2 * px; ctx.stroke();
+      ctx.restore();
+    }
+
+    // Selected item: dimensions, wall distances, handles
+    if (selected && !ui.presentation) {
+      if (layer('showItemDims')) drawItemMeasurements(ctx, selected, geom, px, fontPx);
+      drawSelection(ctx, selected, px);
+    }
+
+    // Snap guides
+    for (const guide of ui.guides) {
+      ctx.save();
+      ctx.strokeStyle = guide.type === 'wall' ? '#1f9a73' : guide.type === 'align' ? '#d0673e' : guide.type === 'furniture' ? '#2f78c0' : '#8573bd';
+      ctx.lineWidth = 1.2 * px; ctx.setLineDash([6 * px, 4 * px]);
+      ctx.beginPath();
+      if (guide.a && guide.b) {
+        const dx = guide.b.x - guide.a.x; const dy = guide.b.y - guide.a.y; const len = Math.hypot(dx, dy) || 1;
+        const ext = 30;
+        ctx.moveTo(guide.a.x - dx / len * ext, guide.a.y - dy / len * ext); ctx.lineTo(guide.b.x + dx / len * ext, guide.b.y + dy / len * ext);
+      } else if (guide.x !== undefined) {
+        ctx.moveTo(guide.x - 60, guide.y); ctx.lineTo(guide.x + 60, guide.y); ctx.moveTo(guide.x, guide.y - 60); ctx.lineTo(guide.x, guide.y + 60);
+      }
+      ctx.stroke();
+      ctx.restore();
+    }
+
+    // Measurement
+    if (ui.measure?.a && ui.measure?.b) {
+      const { a, b } = ui.measure;
+      ctx.save();
+      ctx.strokeStyle = '#d0673e'; ctx.lineWidth = 1.6 * px; ctx.setLineDash([7 * px, 4 * px]);
+      ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke();
+      ctx.setLineDash([]);
+      for (const p of [a, b]) { ctx.beginPath(); ctx.arc(p.x, p.y, 3.5 * px, 0, Math.PI * 2); ctx.fillStyle = '#d0673e'; ctx.fill(); }
+      pill(ctx, { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 }, fmtCm(Geometry.distance(a, b)), px, fontPx, '#d0673e', '#fff');
+      ctx.restore();
+    }
+
+    // Calibration line
+    if (ui.calibration?.a && ui.calibration?.b) {
+      const { a, b } = ui.calibration;
+      ctx.save(); ctx.strokeStyle = '#c4473b'; ctx.lineWidth = 2 * px; ctx.setLineDash([8 * px, 4 * px]);
+      ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke(); ctx.restore();
+    }
+
+    // Architecture editing overlay
+    if (archEditing() && geom) {
+      for (let index = 0; index < (geom.closed ? geom.vertices.length : geom.vertices.length - 1); index += 1) {
+        const a = geom.vertices[index]; const b = geom.vertices[(index + 1) % geom.vertices.length];
+        const confirmed = geom.confirmedWalls?.[index];
+        ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y);
+        ctx.strokeStyle = ui.selectedWall === index ? '#2c6a5d' : confirmed ? 'rgba(44,106,93,.7)' : 'rgba(168,113,31,.75)';
+        ctx.lineWidth = (ui.selectedWall === index ? 4 : 2.2) * px; ctx.stroke();
+      }
+      if (ui.mode === 'walls' || ui.mode === 'draw') {
+        geom.vertices.forEach((p, index) => {
+          ctx.beginPath(); ctx.arc(p.x, p.y, (ui.selectedVertex === index ? 6.5 : 5) * px, 0, Math.PI * 2);
+          ctx.fillStyle = ui.selectedVertex === index ? '#f0a42d' : '#fff'; ctx.fill();
+          ctx.strokeStyle = '#2c6a5d'; ctx.lineWidth = 1.8 * px; ctx.stroke();
+        });
+      }
+    }
+    thicknessOverride = null;
+  }
+
+  function pill(ctx, center, text, px, fontPx, bg = 'rgba(255,255,255,.94)', fg = '#23211e', angle = 0) {
+    ctx.save();
+    ctx.translate(center.x, center.y);
+    if (angle) ctx.rotate(angle);
+    ctx.font = `620 ${fontPx(10.5)}`;
+    const width = ctx.measureText(text).width + 10 * px;
+    const height = 17 * px;
+    ctx.fillStyle = bg;
+    ctx.beginPath();
+    if (ctx.roundRect) ctx.roundRect(-width / 2, -height / 2, width, height, 5 * px); else ctx.rect(-width / 2, -height / 2, width, height);
+    ctx.fill();
+    ctx.fillStyle = fg; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText(text, 0, 0.6 * px);
+    ctx.restore();
+  }
+
+  function drawWallDimensions(ctx, geom, outer, px, fontPx, options) {
+    const vertices = geom.vertices;
+    const count = geom.closed ? vertices.length : vertices.length - 1;
+    const wallThickness = thicknessOf();
+    const outerPoly = outer || vertices;
+    for (let index = 0; index < count; index += 1) {
+      const a = vertices[index];
+      const b = vertices[(index + 1) % vertices.length];
+      const length = Geometry.distance(a, b);
+      if (length * (1 / px) < 34 && !archEditing()) continue;
+      let normal;
+      if (outer) {
+        const frame = edgeFrame(geom, outer, index);
+        normal = frame.normal;
+      } else {
+        normal = { x: -(b.y - a.y) / length, y: (b.x - a.x) / length };
+      }
+      const offset = (outer ? wallThickness : 0) + 18 * px;
+      const p0 = { x: a.x + normal.x * offset, y: a.y + normal.y * offset };
+      const p1 = { x: b.x + normal.x * offset, y: b.y + normal.y * offset };
+      const confirmed = Boolean(geom.confirmedWalls?.[index]);
+      const label = geom.wallLabels?.[index];
+      const color = confirmed ? '#2c6a5d' : '#a8711f';
+      ctx.save();
+      ctx.strokeStyle = confirmed ? 'rgba(44,106,93,.7)' : 'rgba(120,104,82,.55)';
+      ctx.lineWidth = 0.9 * px;
+      ctx.beginPath();
+      ctx.moveTo(p0.x, p0.y); ctx.lineTo(p1.x, p1.y);
+      // extension lines
+      const e0 = { x: a.x + normal.x * (outer ? wallThickness + 3 * px : 3 * px), y: a.y + normal.y * (outer ? wallThickness + 3 * px : 3 * px) };
+      const e1 = { x: b.x + normal.x * (outer ? wallThickness + 3 * px : 3 * px), y: b.y + normal.y * (outer ? wallThickness + 3 * px : 3 * px) };
+      ctx.moveTo(e0.x, e0.y); ctx.lineTo(p0.x + normal.x * 4 * px, p0.y + normal.y * 4 * px);
+      ctx.moveTo(e1.x, e1.y); ctx.lineTo(p1.x + normal.x * 4 * px, p1.y + normal.y * 4 * px);
+      ctx.stroke();
+      // architectural ticks
+      const tx = (b.x - a.x) / length; const ty = (b.y - a.y) / length;
+      for (const p of [p0, p1]) {
+        ctx.beginPath();
+        ctx.moveTo(p.x - (tx + normal.x) * 3.5 * px, p.y - (ty + normal.y) * 3.5 * px);
+        ctx.lineTo(p.x + (tx + normal.x) * 3.5 * px, p.y + (ty + normal.y) * 3.5 * px);
+        ctx.lineWidth = 1.4 * px; ctx.stroke();
+      }
+      let angle = Math.atan2(b.y - a.y, b.x - a.x);
+      if (angle > Math.PI / 2 || angle <= -Math.PI / 2) angle += Math.PI;
+      let text = confirmed ? fmt(length) : `≈ ${fmt(length)}`;
+      if (!confirmed && label && Math.abs(label - length) > 0.5 && (options.interactive || options.drawingLabels)) text += `  ·  rajz: ${fmt(label)}`;
+      pill(ctx, { x: (p0.x + p1.x) / 2, y: (p0.y + p1.y) / 2 }, text, px, fontPx, 'rgba(251,250,247,.96)', color, angle);
+      ctx.restore();
+    }
+    void outerPoly;
+  }
+
+  function drawItemMeasurements(ctx, item, geom, px, fontPx) {
+    const corners = Geometry.rotatedRectCorners(item);
+    const center = Geometry.itemCenter(item);
+    // Width/depth labels on the front and right edges
+    const label = (a, b, text) => {
+      const mid = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
+      const out = { x: mid.x - center.x, y: mid.y - center.y };
+      const len = Math.hypot(out.x, out.y) || 1;
+      let angle = Math.atan2(b.y - a.y, b.x - a.x);
+      if (angle > Math.PI / 2 || angle <= -Math.PI / 2) angle += Math.PI;
+      pill(ctx, { x: mid.x + out.x / len * 13 * px, y: mid.y + out.y / len * 13 * px }, text, px, fontPx, 'rgba(44,106,93,.95)', '#fff', angle);
+    };
+    label(corners[2], corners[3], fmtCm(item.w));
+    label(corners[1], corners[2], fmtCm(item.h));
+    if (!geom) return;
+    const segments = Geometry.wallSegments(geom);
+    for (const value of Geometry.wallClearances(item, segments)) {
+      if (!Number.isFinite(value.distance) || value.distance > 800 || value.distance < 0.5) continue;
+      ctx.save();
+      ctx.strokeStyle = 'rgba(208,103,62,.85)'; ctx.lineWidth = 1 * px; ctx.setLineDash([3 * px, 3 * px]);
+      ctx.beginPath(); ctx.moveTo(value.from.x, value.from.y); ctx.lineTo(value.to.x, value.to.y); ctx.stroke();
+      ctx.restore();
+      if (value.distance / px > 36) pill(ctx, { x: (value.from.x + value.to.x) / 2, y: (value.from.y + value.to.y) / 2 }, fmt(value.distance, 0), px, fontPx, 'rgba(255,255,255,.95)', '#b4532c');
+    }
+  }
+
+  function handlePositions(item) {
+    // Returns world-space handle positions in cm (rotation handle offset in screen px).
+    const z = ui.view2d.z;
+    const angle = rad(item.rot || 0);
+    const local = (x, y) => ({ x: item.x + x * Math.cos(angle) - y * Math.sin(angle), y: item.y + x * Math.sin(angle) + y * Math.cos(angle) });
+    const handles = [{ type: 'rotate', p: local(item.w / 2, -30 / z), anchor: local(item.w / 2, 0) }];
+    if (isResizable(item)) {
+      handles.push(
+        { type: 'r', p: local(item.w, item.h / 2) }, { type: 'l', p: local(0, item.h / 2) },
+        { type: 'b', p: local(item.w / 2, item.h) }, { type: 't', p: local(item.w / 2, 0) },
+        { type: 'br', p: local(item.w, item.h) }, { type: 'tl', p: local(0, 0) },
+        { type: 'tr', p: local(item.w, 0) }, { type: 'bl', p: local(0, item.h) }
+      );
+    }
+    return handles;
+  }
+
+  function isResizable(item) {
+    return !item.locked && item.source !== 'ikea';
+  }
+
+  function drawSelection(ctx, item, px) {
+    const corners = Geometry.rotatedRectCorners(item, 2 * px);
+    ctx.save();
+    ctx.beginPath(); corners.forEach((p, i) => (i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y))); ctx.closePath();
+    ctx.strokeStyle = item.locked ? '#8a8378' : '#2c6a5d'; ctx.lineWidth = 1.6 * px; ctx.stroke();
+    if (!item.locked) {
+      for (const handle of handlePositions(item)) {
+        if (handle.type === 'rotate') {
+          ctx.beginPath(); ctx.moveTo(handle.anchor.x, handle.anchor.y); ctx.lineTo(handle.p.x, handle.p.y);
+          ctx.strokeStyle = '#2c6a5d'; ctx.lineWidth = 1.2 * px; ctx.stroke();
+          ctx.beginPath(); ctx.arc(handle.p.x, handle.p.y, 7 * px, 0, Math.PI * 2);
+          ctx.fillStyle = '#2c6a5d'; ctx.fill();
+          ctx.strokeStyle = '#fff'; ctx.lineWidth = 1.4 * px;
+          ctx.beginPath(); ctx.arc(handle.p.x, handle.p.y, 3.4 * px, -Math.PI * 0.9, Math.PI * 0.5); ctx.stroke();
+        } else {
+          const s = (handle.type.length === 2 ? 4.5 : 4) * px;
+          ctx.save(); ctx.translate(handle.p.x, handle.p.y); ctx.rotate(rad(item.rot || 0));
+          ctx.fillStyle = '#fff'; ctx.strokeStyle = '#2c6a5d'; ctx.lineWidth = 1.4 * px;
+          ctx.beginPath(); if (ctx.roundRect) ctx.roundRect(-s, -s, s * 2, s * 2, 1.5 * px); else ctx.rect(-s, -s, s * 2, s * 2);
+          ctx.fill(); ctx.stroke(); ctx.restore();
+        }
+      }
+    }
+    ctx.restore();
+  }
+
+  // ------------------------------------------------------------------ warnings
+  let currentWarnings = [];
+  let warnedIds = new Set();
+  function computeWarnings() {
+    const geom = geometry();
+    const list = items();
+    const map = new Map();
+    warnedIds = new Set();
+    const solids = list.filter(item => Catalog.layerFor(item) === 'main');
+    // Seating is meant to slide under tables and desks: no overlap warning between them.
+    const seating = new Set(['chair', 'chair-upholstered', 'stool', 'office-chair', 'bench', 'pouf']);
+    const tables = new Set(['table', 'table-round', 'desk', 'island', 'coffee-table', 'coffee-round', 'side-table']);
+    const compatible = (p, q) => (seating.has(Catalog.modelFor(p)) && tables.has(Catalog.modelFor(q))) || (seating.has(Catalog.modelFor(q)) && tables.has(Catalog.modelFor(p)));
+    for (const item of list) {
+      const layerName = Catalog.layerFor(item);
+      const others = layerName === 'main' ? solids.filter(other => !compatible(item, other)) : [];
+      const warnings = Geometry.analyzePlacement(item, others, layerName === 'main' ? geom : (geom ? { ...geom, objects: [], partitions: [] } : null), { clearance: item.id === ui.selectedId ? ui.clearance : 0 });
+      for (const warning of warnings) {
+        if (warning.type === 'boundary' && layerName === 'top') continue;
+        warnedIds.add(item.id);
+        if (warning.id && warning.type === 'furniture') warnedIds.add(warning.id);
+        const other = list.find(value => value.id === warning.id);
+        const key = warning.type === 'furniture' ? `f-${[item.id, warning.id].sort().join('-')}` : `${warning.type}-${item.id}-${warning.id || ''}`;
+        const text = {
+          furniture: `„${item.name}” és „${other?.name || 'bútor'}” átfedésben van`,
+          boundary: `„${item.name}” kilóg a falon túlra`,
+          door: `„${item.name}” ajtónyitási területbe ér`,
+          partition: `„${item.name}” falcsonkot metsz`,
+          clearance: `„${item.name}” ${warning.distance} cm-es sávjában bútor áll`
+        }[warning.type];
+        if (text) map.set(key, { text, id: item.id, soft: warning.type === 'clearance' });
+      }
+    }
+    currentWarnings = [...map.values()];
+    return currentWarnings;
+  }
+
+  function renderWarnings() {
+    const chip = $('warningChip');
+    const warnings = currentWarnings;
+    chip.hidden = !warnings.length || ui.presentation || ui.view !== '2d';
+    $('warningCount').textContent = `${warnings.length} figyelmeztetés`;
+    const list = $('warningList');
+    if (!list.hidden) {
+      list.innerHTML = warnings.map((warning, index) => `<button data-index="${index}"><span class="dot${warning.soft ? ' soft' : ''}"></span><span>${escapeHtml(warning.text)}</span></button>`).join('');
+      list.querySelectorAll('button').forEach(button => { button.onclick = () => select(warnings[Number(button.dataset.index)].id); });
+    }
+  }
+
+  // ------------------------------------------------------------------ render loop
+  let renderQueued = false;
+  let inspectorQueued = false;
+  function requestRender() {
+    if (renderQueued) return;
+    renderQueued = true;
+    requestAnimationFrame(() => {
+      renderQueued = false;
+      computeWarnings();
+      renderWarnings();
+      if (ui.view === '2d') draw2D();
+      sync3D();
+      if (inspectorQueued) { inspectorQueued = false; renderInspector(); }
+    });
+  }
+
+  function draw2D() {
+    const wrap = $('view2d');
+    const width = wrap.clientWidth; const height = wrap.clientHeight;
+    const dpr = window.devicePixelRatio || 1;
+    if (canvas.width !== Math.round(width * dpr) || canvas.height !== Math.round(height * dpr)) {
+      canvas.width = Math.round(width * dpr); canvas.height = Math.round(height * dpr);
+    }
+    drawPlan(screenCtx, { ...ui.view2d, dpr, width, height }, {
+      interactive: !ui.presentation,
+      warnings: warnedIds,
+      labels: layer('showLabels'),
+      dims: layer('showDims') && !(ui.presentation && false)
+    });
+    $('zoomLabel').textContent = `${Math.round(ui.view2d.z / baseZoom() * 100)}%`;
+  }
+
+  function baseZoom() {
+    const b = roomBounds();
+    const wrap = $('view2d');
+    return Math.min((wrap.clientWidth - 160) / Math.max(50, b.maxX - b.minX), (wrap.clientHeight - 170) / Math.max(50, b.maxY - b.minY)) || 1;
+  }
+
+  let needsFit = false;
+  function fitView() {
+    const b = roomBounds();
+    const wrap = $('view2d');
+    if (!wrap.clientWidth || !wrap.clientHeight) { needsFit = true; return; }
+    needsFit = false;
+    const width = wrap.clientWidth || 800; const height = wrap.clientHeight || 600;
+    const top = ui.mode !== 'furnish' ? 90 : 0; // room for the editing banner
+    const z = Math.max(0.05, Math.min((width - 170) / Math.max(50, b.maxX - b.minX), (height - 200 - top) / Math.max(50, b.maxY - b.minY)));
+    ui.view2d = { z, x: width / 2 - (b.minX + b.maxX) / 2 * z, y: top + (height - 70 - top) / 2 - (b.minY + b.maxY) / 2 * z };
+    requestRender();
+  }
+
+  function zoomAt(factor, at) {
+    const wrap = $('view2d');
+    const point = at || { x: wrap.clientWidth / 2, y: wrap.clientHeight / 2 };
+    const world = toWorld(point);
+    const base = baseZoom();
+    ui.view2d.z = clamp(ui.view2d.z * factor, base * 0.15, base * 14);
+    ui.view2d.x = point.x - world.x * ui.view2d.z;
+    ui.view2d.y = point.y - world.y * ui.view2d.z;
+    requestRender();
+  }
+
+  const toWorld = point => ({ x: (point.x - ui.view2d.x) / ui.view2d.z, y: (point.y - ui.view2d.y) / ui.view2d.z });
+  const toScreen = point => ({ x: point.x * ui.view2d.z + ui.view2d.x, y: point.y * ui.view2d.z + ui.view2d.y });
+
+  // ------------------------------------------------------------------ 3D bridge
+  let view3d = null;
+  let view3dFactory = null;
+  function ensure3D() {
+    if (view3d || !view3dFactory) return view3d;
     try {
-      localStorage.setItem(Core.PLAN_STORAGE_KEY, snapshot);
-      lastSnapshot = snapshot;
-      $('saveState').textContent = '✓ Automatikusan mentve';
-      return true;
-    } catch {
-      $('saveState').textContent = '⚠ A helyi tárhely megtelt';
-      flash('A mentés nem sikerült. A feltöltött alaprajz túl nagy lehet; mentsd le a tervet JSON-fájlba.', 9000);
-      return false;
+      view3d = view3dFactory($('view3d'), api3d);
+      $('view3dLoading').hidden = true;
+      view3d.setAO(ui.ao);
+      view3d.setCameraMode(ui.camera);
+    } catch (error) {
+      console.error(error);
+      $('view3dLoading').textContent = 'A 3D nézet nem indítható ezen az eszközön (WebGL szükséges).';
+    }
+    return view3d;
+  }
+
+  function sync3D() {
+    if (!view3d) return;
+    view3d.update({
+      roomId: ui.roomId,
+      geometry: geometry(),
+      items: items(),
+      materials: roomMaterials(),
+      wallHeight: Number(room().wallHeight) || Core.DEFAULT_WALL_HEIGHT,
+      wallThickness: thickness(),
+      selectedId: ui.selectedId,
+      cutaway: ui.cutaway,
+      sunAzimuth: ui.sunAzimuth,
+      lampsOn: ui.lampsOn,
+      presentation: ui.presentation,
+      backgroundColor: '#f1ede6'
+    });
+  }
+
+  const api3d = {
+    select: id => select(id),
+    moveItem: (id, x, y, options = {}) => {
+      const item = items().find(value => value.id === id);
+      if (!item || item.locked) return;
+      const moved = applySnap({ ...item, x, y }, options.snap);
+      item.x = moved.x; item.y = moved.y;
+      ui.guides = moved.guides || [];
+      requestRender();
+      updateInspectorPosition();
+    },
+    commit: label => { ui.guides = []; commit(label); renderInspector(); requestRender(); }
+  };
+
+  window.ZuglakApp = Object.freeze({
+    registerView3D(factory) {
+      view3dFactory = factory;
+      if (ui.view === '3d') { ensure3D(); view3d?.setVisible(true); requestRender(); }
+    },
+    // Test & automation hooks (read-only views and high-level commands).
+    state: () => ({ roomId: ui.roomId, view: ui.view, selectedId: ui.selectedId, mode: ui.mode, items: JSON.parse(JSON.stringify(items())), materials: { ...roomMaterials() }, variant: room().active, warnings: currentWarnings.map(value => value.text) }),
+    addProduct: (key, at) => addProduct(Catalog.all.find(value => value.key === key), at),
+    setView: value => setView(value),
+    select: id => select(id),
+    view3d: () => view3d,
+    worldToScreen: point => toScreen(point),
+    commit,
+    data: () => data
+  });
+
+  // ------------------------------------------------------------------ snapping
+  function applySnap(candidate, enabled = true) {
+    const snapOn = $('snap').getAttribute('aria-pressed') === 'true';
+    if (!enabled || !snapOn) return { x: candidate.x, y: candidate.y, guides: [] };
+    const geom = geometry();
+    const others = items().filter(value => value.id !== candidate.id && Catalog.layerFor(value) !== 'floor');
+    const result = Geometry.snapFurniture(candidate, {
+      threshold: 9 / ui.view2d.z,
+      walls: layer('snapWalls') && Boolean(geom),
+      roomVertices: geom?.vertices,
+      roomClosed: geom?.closed,
+      partitions: geom?.partitions,
+      furniture: layer('snapFurniture'),
+      align: layer('snapAlign'),
+      otherItems: others,
+      grid: layer('snapGrid'),
+      gridSize: 5
+    });
+    return result;
+  }
+
+  // ------------------------------------------------------------------ selection & item ops
+  function select(id) {
+    ui.selectedId = id && items().some(item => item.id === id) ? id : null;
+    if (ui.selectedId) { ui.selectedObjectId = null; ui.selectedWall = null; ui.selectedVertex = null; }
+    document.body.classList.toggle('has-selection', Boolean(ui.selectedId));
+    renderInspector();
+    renderMaterialsSelection();
+    requestRender();
+  }
+
+  function freeSpot(product) {
+    const geom = geometry();
+    const wrap = $('view2d');
+    let center = ui.view === '2d' ? toWorld({ x: wrap.clientWidth / 2, y: wrap.clientHeight / 2 }) : null;
+    if (!center || (geom?.closed && !Geometry.pointInPolygon(center, geom.vertices))) {
+      if (geom?.vertices.length >= 3) {
+        // Centroid-ish point that is inside the polygon
+        const b = Geometry.polygonBounds(geom.vertices);
+        center = { x: (b.minX + b.maxX) / 2, y: (b.minY + b.maxY) / 2 };
+        if (!Geometry.pointInPolygon(center, geom.vertices)) {
+          for (let step = 0; step < 200; step += 1) {
+            const p = { x: b.minX + Math.random() * (b.maxX - b.minX), y: b.minY + Math.random() * (b.maxY - b.minY) };
+            if (Geometry.pointInPolygon(p, geom.vertices)) { center = p; break; }
+          }
+        }
+      } else center = { x: 200, y: 200 };
+    }
+    return { x: center.x - Number(product.width) / 2, y: center.y - Number(product.depth) / 2 };
+  }
+
+  function addProduct(product, at) {
+    if (!product) return null;
+    try {
+      const position = at ? { x: at.x - Number(product.width) / 2, y: at.y - Number(product.depth) / 2 } : freeSpot(product);
+      const item = product.source === 'ikea'
+        ? Core.createFurnitureItem({ ...product, type: product.type }, position, idFactory)
+        : Core.createGenericItem(product, position, idFactory);
+      if (product.source === 'ikea') { item.model = product.model || Catalog.ikeaModel(product); item.materials = { ...(product.materials || {}) }; }
+      item.materials = { ...Catalog.defaultMaterials(item.model), ...(item.materials || {}) };
+      items().push(item);
+      commit('Bútor hozzáadása');
+      select(item.id);
+      toast(`Hozzáadva: ${item.name} · ${fmt(item.w)} × ${fmt(item.h)} cm`);
+      return item;
+    } catch (error) {
+      toast(error.message || 'A bútor nem adható hozzá.');
+      return null;
     }
   }
 
-  function flash(text, duration = 5000) {
-    $('status').textContent = text;
-    clearTimeout(statusTimeout);
-    if (duration) {
-      statusTimeout = setTimeout(() => {
-        $('status').textContent = 'A terv szerkeszthető. Kattints egy bútorra a hozzáadáshoz.';
-      }, duration);
-    }
+  function duplicateSelected() {
+    const item = selectedItem();
+    if (!item) return;
+    const copy = JSON.parse(JSON.stringify(item));
+    copy.id = idFactory();
+    copy.x += 20; copy.y += 20;
+    copy.locked = false;
+    items().push(copy);
+    commit('Másolat');
+    select(copy.id);
+    toast('Másolat létrehozva');
   }
+
+  function deleteSelected() {
+    const item = selectedItem();
+    if (!item) return;
+    variant().items = items().filter(value => value.id !== item.id);
+    ui.selectedId = null;
+    commit('Törlés');
+    select(null);
+    toast(`Törölve: ${item.name}`);
+  }
+
+  function rotateSelected(delta, absolute = false) {
+    const item = selectedItem();
+    if (!item || item.locked) return;
+    Object.assign(item, Geometry.rotateAboutCenter(item, absolute ? delta : (item.rot || 0) + delta));
+    commit('Forgatás', { merge: true });
+    renderInspector();
+    requestRender();
+  }
+
+  function nudgeSelected(dx, dy) {
+    const item = selectedItem();
+    if (!item || item.locked) return;
+    item.x += dx; item.y += dy;
+    commit('Mozgatás', { merge: true });
+    updateInspectorPosition();
+    requestRender();
+  }
+
+  // ------------------------------------------------------------------ hit testing
+  function hitItem(point) {
+    const order = { top: 0, main: 1, floor: 2 };
+    const list = [...items()].reverse().sort((p, q) => (order[Catalog.layerFor(p)] ?? 1) - (order[Catalog.layerFor(q)] ?? 1));
+    for (const item of list) {
+      if (Geometry.pointInPolygon(point, Geometry.rotatedRectCorners(item), true)) return item;
+    }
+    return null;
+  }
+
+  function hitHandle(screenPoint) {
+    const item = selectedItem();
+    if (!item || item.locked) return null;
+    for (const handle of handlePositions(item)) {
+      const p = toScreen(handle.p);
+      if (Math.hypot(p.x - screenPoint.x, p.y - screenPoint.y) <= (handle.type === 'rotate' ? 11 : 8)) return handle;
+    }
+    return null;
+  }
+
+  function hitVertex(screenPoint) {
+    const geom = geometry();
+    if (!geom) return -1;
+    let best = -1; let bestDistance = 12;
+    geom.vertices.forEach((v, index) => {
+      const p = toScreen(v);
+      const d = Math.hypot(p.x - screenPoint.x, p.y - screenPoint.y);
+      if (d < bestDistance) { best = index; bestDistance = d; }
+    });
+    return best;
+  }
+
+  function hitWall(worldPoint) {
+    const geom = geometry();
+    if (!geom || geom.vertices.length < 2) return null;
+    const nearest = Geometry.nearestWall(worldPoint, geom.vertices, geom.closed);
+    return nearest && nearest.distance <= Math.max(thickness() + 4, 14 / ui.view2d.z) ? nearest : null;
+  }
+
+  function hitObject(worldPoint) {
+    const geom = geometry();
+    if (!geom) return null;
+    let best = null;
+    for (const object of geom.objects || []) {
+      let distance = Infinity;
+      if (object.type === 'radiator') {
+        const polygon = Geometry.radiatorPolygon(object, geom.vertices);
+        distance = Geometry.pointInPolygon(worldPoint, polygon, true) ? 0 : Infinity;
+      } else {
+        const segment = object.fullWall ? (() => { const frame = Geometry.wallFrame(geom.vertices, object.wallIndex, 0); return frame ? { a: frame.start, b: frame.end } : null; })() : Geometry.openingSegment(object, geom.vertices);
+        if (segment) distance = Geometry.nearestPointOnSegment(worldPoint, segment.a, segment.b).distance;
+      }
+      if (distance <= Math.max(thickness() + 3, 12 / ui.view2d.z) && (!best || distance < best.distance)) best = { object, distance };
+    }
+    return best?.object || null;
+  }
+
+  // ------------------------------------------------------------------ pointer interaction (2D)
+  let drag = null;
+  let spaceDown = false;
+  const pointers = new Map();
 
   function localPoint(event) {
     const rect = canvas.getBoundingClientRect();
     return { x: event.clientX - rect.left, y: event.clientY - rect.top };
   }
 
-  const world = point => ({ x: (point.x - view.x) / view.z, y: (point.y - view.y) / view.z });
-
-  function furnitureSize(item) {
-    const value = scale() || 2;
-    return { w: Math.max(1, item.w * value), h: Math.max(1, item.h * value) };
-  }
-
-  function rounded(x, y, width, height, radius, fill, stroke = '#647568') {
-    const w = Math.max(1, width);
-    const h = Math.max(1, height);
-    const r = Math.max(0, Math.min(radius, w / 2, h / 2));
-    ctx.beginPath();
-    if (ctx.roundRect) ctx.roundRect(x, y, w, h, r);
-    else ctx.rect(x, y, w, h);
-    ctx.fillStyle = fill;
-    ctx.fill();
-    if (stroke) {
-      ctx.strokeStyle = stroke;
-      ctx.lineWidth = Math.max(0.7, 1 / view.z);
-      ctx.stroke();
+  canvas.addEventListener('pointerdown', event => {
+    document.body.classList.remove('panel-open');
+    if (ui.presentation) return;
+    try { canvas.setPointerCapture(event.pointerId); } catch { /* synthetic or already released pointer */ }
+    const point = localPoint(event);
+    pointers.set(event.pointerId, point);
+    if (pointers.size === 2) {
+      const [p1, p2] = [...pointers.values()];
+      drag = { type: 'pinch', distance: Math.hypot(p1.x - p2.x, p1.y - p2.y), center: { x: (p1.x + p2.x) / 2, y: (p1.y + p2.y) / 2 }, view: { ...ui.view2d } };
+      return;
     }
-  }
-
-  function drawLine(x1, y1, x2, y2, color, width = 1) {
-    ctx.beginPath();
-    ctx.moveTo(x1, y1);
-    ctx.lineTo(x2, y2);
-    ctx.strokeStyle = color;
-    ctx.lineWidth = Math.max(width, 0.7 / view.z);
-    ctx.stroke();
-  }
-
-  // Purpose-built vector floor-plan illustrations; no product photography or invented product contours.
-  function art(type, width, height, isIkea = false) {
-    const min = Math.min(width, height);
-    const pad = Math.max(2 / view.z, min * 0.075);
-    const line = Math.max(.65 / view.z, min * .012);
-    const palette = isIkea
-      ? { base: '#c8d0c4', light: '#f4f2e9', edge: '#596b62', accent: '#91a294', wood: '#cba476', darkWood: '#8b6644' }
-      : { base: '#d8d0c3', light: '#f3eee6', edge: '#736e64', accent: '#b2a99b', wood: '#caa277', darkWood: '#89684c' };
-    const rect = (x, y, w, h, r, color, stroke = palette.edge) => rounded(x, y, w, h, r, color, stroke);
-    const linear = (x1, y1, x2, y2, stops) => {
-      const gradient = ctx.createLinearGradient(x1, y1, x2, y2);
-      stops.forEach(([offset, color]) => gradient.addColorStop(offset, color));
-      return gradient;
-    };
-
-    ctx.save();
-    ctx.shadowColor = 'rgba(30,45,38,.19)';
-    ctx.shadowBlur = 8 / view.z;
-    ctx.shadowOffsetY = 3 / view.z;
-    rect(0, 0, width, height, min * .075, linear(0, 0, width, height, [[0, palette.light], [1, palette.base]]));
-    ctx.shadowColor = 'transparent';
-
-    if (type === 'sofa' || type === 'armchair') {
-      const arm = Math.max(pad, width * .055);
-      const back = Math.max(pad * 1.18, height * .17);
-      rect(arm * .72, back * .72, width - arm * 1.44, height - back * 1.15, min * .075, linear(0, 0, 0, height, [[0, '#ebe9df'], [1, '#d6d9cf']]), '#718078');
-      rect(0, 0, width, back, min * .055, linear(0, 0, 0, back, [[0, '#aeb9ab'], [1, '#8f9d90']]));
-      rect(0, back * .25, arm, height - back * .25, min * .05, '#9eaa9d');
-      rect(width - arm, back * .25, arm, height - back * .25, min * .05, '#9eaa9d');
-      const cushions = type === 'sofa' ? (width > height * 2.15 ? 3 : 2) : 1;
-      for (let index = 0; index < cushions; index += 1) {
-        const gap = 1.5 / view.z;
-        const seatWidth = (width - arm * 2) / cushions;
-        rect(arm + index * seatWidth + gap, back + gap, seatWidth - gap * 2, height - back - pad * .65, min * .045, index % 2 ? '#e6e5dc' : '#eceae1', '#aeb7ad');
-        drawLine(arm + index * seatWidth + seatWidth * .16, back + seatWidth * .05, arm + index * seatWidth + seatWidth * .84, back + seatWidth * .05, '#f8f7f2', line);
-      }
-      drawLine(arm * .65, height - pad * .55, width - arm * .65, height - pad * .55, '#79887f', line);
-    } else if (type === 'bed') {
-      rect(pad * .55, pad * .4, width - pad * 1.1, height - pad * .8, min * .045, '#f8f5ee', '#8e8172');
-      rect(0, 0, width, pad * 1.25, min * .035, linear(0, 0, width, 0, [[0, '#8c6b4f'], [.5, '#b28d68'], [1, '#8c6b4f']]));
-      const pillowY = pad * 1.45;
-      rect(pad * 1.05, pillowY, width / 2 - pad * 1.25, height * .17, min * .055, '#fffdfa', '#c8c4ba');
-      rect(width / 2 + pad * .2, pillowY, width / 2 - pad * 1.25, height * .17, min * .055, '#fffdfa', '#c8c4ba');
-      const duvet = linear(0, height * .35, width, height, [[0, '#b8cbc3'], [.5, '#d4dfda'], [1, '#a9c0b7']]);
-      rect(pad * .82, height * .34, width - pad * 1.64, height * .58, min * .05, duvet, '#8ba79c');
-      ctx.globalAlpha = .5;
-      drawLine(width * .38, height * .38, width * .32, height * .88, '#f5f8f6', 2 / view.z);
-      drawLine(width * .66, height * .38, width * .7, height * .88, '#8fa99f', line);
-      ctx.globalAlpha = 1;
-    } else if (['table', 'desk', 'coffee'].includes(type)) {
-      const tabletop = linear(0, 0, width, height, [[0, '#dfc197'], [.48, palette.wood], [1, '#b98d61']]);
-      rect(pad * .34, pad * .34, width - pad * .68, height - pad * .68, min * .07, tabletop, '#8d694a');
-      ctx.save();
-      ctx.globalAlpha = .3;
-      for (let index = 1; index < 7; index += 1) {
-        const x = width * index / 7;
-        ctx.beginPath();
-        ctx.moveTo(x, pad * .7);
-        ctx.bezierCurveTo(x + min * .035, height * .35, x - min * .025, height * .7, x, height - pad * .7);
-        ctx.strokeStyle = '#805d3d'; ctx.lineWidth = line; ctx.stroke();
-      }
-      ctx.restore();
-      const leg = Math.max(2.5 / view.z, min * .085);
-      [[pad * .8, pad * .8], [width - pad * .8 - leg, pad * .8], [pad * .8, height - pad * .8 - leg], [width - pad * .8 - leg, height - pad * .8 - leg]].forEach(([x, y]) => rect(x, y, leg, leg, leg / 2, palette.darkWood, null));
-      if (type === 'desk') drawLine(width * .15, height * .72, width * .85, height * .72, '#9a734f', line);
-    } else if (type === 'chair' || type === 'stool') {
-      const seat = linear(0, 0, width, height, [[0, '#ead7ba'], [1, '#c8a77e']]);
-      rect(pad * .88, pad, width - pad * 1.76, height - pad * 1.9, min * .11, seat, '#896e55');
-      if (type === 'chair') {
-        rect(pad * .5, pad * .35, width - pad, Math.max(4 / view.z, height * .17), min * .04, '#9a7657', '#755a45');
-        drawLine(pad, pad * .92, pad * .88, height - pad * .5, '#7d624d', 1.5 / view.z);
-        drawLine(width - pad, pad * .92, width - pad * .88, height - pad * .5, '#7d624d', 1.5 / view.z);
-      }
-      const foot = Math.max(1.6 / view.z, min * .038);
-      [[pad, height - pad], [width - pad, height - pad]].forEach(([x, y]) => { ctx.beginPath(); ctx.arc(x, y, foot, 0, Math.PI * 2); ctx.fillStyle = '#695342'; ctx.fill(); });
-    } else if (type === 'wardrobe') {
-      rect(pad * .3, pad * .3, width - pad * .6, height - pad * .6, min * .025, linear(0, 0, width, 0, [[0, '#e3ddd1'], [.5, '#cfc7ba'], [1, '#eee9e0']]), '#827a6e');
-      const doors = width > height * 2.5 ? 4 : width > height * 1.5 ? 3 : 2;
-      for (let index = 1; index < doors; index += 1) drawLine(width * index / doors, pad * .38, width * index / doors, height - pad * .38, '#968e82', line);
-      for (let index = 0; index < doors; index += 1) {
-        const center = width * (index + .5) / doors;
-        rect(center - Math.max(1 / view.z, min * .012), height * .41, Math.max(2 / view.z, min * .024), height * .18, min * .01, '#756f66', null);
-      }
-      drawLine(pad * .7, height - pad, width - pad * .7, height - pad, '#aaa195', line);
-    } else if (type === 'dresser' || type === 'shelf') {
-      rect(pad * .35, pad * .35, width - pad * .7, height - pad * .7, min * .025, linear(0, 0, width, height, [[0, '#decbb2'], [1, '#bba184']]), '#826d57');
-      const sections = width > height * 2 ? 4 : 3;
-      for (let index = 1; index < sections; index += 1) drawLine(width * index / sections, pad * .4, width * index / sections, height - pad * .4, '#947b62', line);
-      drawLine(pad * .5, height / 2, width - pad * .5, height / 2, '#9f856b', line);
-      for (let index = 0; index < sections; index += 1) {
-        ctx.beginPath(); ctx.arc(width * (index + .5) / sections, height / 2, Math.max(1 / view.z, min * .018), 0, Math.PI * 2); ctx.fillStyle = '#6f5b49'; ctx.fill();
-      }
-    } else if (type === 'rug') {
-      rect(pad * .25, pad * .25, width - pad * .5, height - pad * .5, min * .055, linear(0, 0, width, height, [[0, '#d9c2a8'], [1, '#b69b81']]), '#9e8168');
-      ctx.save(); ctx.globalAlpha = .32; ctx.strokeStyle = '#fff7ed'; ctx.lineWidth = Math.max(1 / view.z, min * .018);
-      for (let index = 1; index < 5; index += 1) { ctx.beginPath(); ctx.moveTo(pad, height * index / 5); ctx.lineTo(width - pad, height * index / 5); ctx.stroke(); }
-      ctx.setLineDash([5 / view.z, 4 / view.z]); ctx.strokeRect(pad, pad, width - pad * 2, height - pad * 2); ctx.restore();
-    } else if (type === 'plant') {
-      const radius = min * .33;
-      const leafColors = ['#3e785b', '#568a64', '#6c9a6b', '#2f684f'];
-      for (let index = 0; index < 12; index += 1) {
-        const angle = index * Math.PI * 2 / 12;
-        ctx.save(); ctx.translate(width / 2, height / 2); ctx.rotate(angle);
-        ctx.beginPath(); ctx.ellipse(radius * .45, 0, radius * .7, radius * .22, 0, 0, Math.PI * 2); ctx.fillStyle = leafColors[index % leafColors.length]; ctx.fill(); ctx.restore();
-      }
-      ctx.beginPath(); ctx.arc(width / 2, height / 2, radius * .32, 0, Math.PI * 2); ctx.fillStyle = '#a9805b'; ctx.fill(); ctx.strokeStyle = '#6d573f'; ctx.lineWidth = line; ctx.stroke();
-    } else if (type === 'lamp') {
-      const radius = min * .4;
-      ctx.beginPath(); ctx.arc(width / 2, height / 2, radius, 0, Math.PI * 2); ctx.fillStyle = '#d5b36e'; ctx.fill(); ctx.strokeStyle = '#7c6949'; ctx.lineWidth = line; ctx.stroke();
-      ctx.beginPath(); ctx.arc(width / 2, height / 2, radius * .55, 0, Math.PI * 2); ctx.fillStyle = '#fff7d8'; ctx.fill();
-      ctx.beginPath(); ctx.arc(width / 2, height / 2, radius * .12, 0, Math.PI * 2); ctx.fillStyle = '#7b6746'; ctx.fill();
-    } else if (type === 'tv') {
-      rect(pad * .7, pad, width - pad * 1.4, height - pad * 2, min * .025, linear(0, 0, width, height, [[0, '#263236'], [1, '#111719']]), '#4d5a5d');
-      drawLine(width / 2, height - pad, width / 2, height, '#596568', 2 / view.z);
-    } else if (type === 'bath' || type === 'sink') {
-      rect(pad * .55, pad * .55, width - pad * 1.1, height - pad * 1.1, min * .22, linear(0, 0, width, height, [[0, '#fff'], [1, '#dae8e9']]), '#93a8aa');
-      ctx.beginPath(); ctx.arc(width * .8, height * .5, Math.max(1 / view.z, min * .045), 0, Math.PI * 2); ctx.fillStyle = '#91a6a8'; ctx.fill();
-    } else {
-      ctx.setLineDash([4 / view.z, 3 / view.z]); ctx.strokeStyle = palette.edge; ctx.strokeRect(pad, pad, width - 2 * pad, height - 2 * pad); ctx.setLineDash([]);
+    const world = toWorld(point);
+    if (event.button === 1 || event.button === 2 || spaceDown || ui.tool === 'pan') {
+      drag = { type: 'pan', start: point, view: { ...ui.view2d } };
+      canvas.style.cursor = 'grabbing';
+      return;
     }
-
-    if (isIkea && width > 55 / view.z && height > 22 / view.z) {
-      const fontSize = clamp(min * .1, 7 / view.z, 11 / view.z);
-      ctx.font = `750 ${fontSize}px system-ui`; ctx.textAlign = 'right'; ctx.textBaseline = 'bottom'; ctx.fillStyle = '#465b52'; ctx.globalAlpha = .62;
-      ctx.fillText('IKEA', width - pad * .65, height - pad * .45);
+    if (ui.mode !== 'furnish') { architecturePointerDown(world, point, event); return; }
+    if (ui.tool === 'measure') {
+      if (!ui.measure || ui.measure.b && !ui.measure.active) ui.measure = { a: world, b: world, active: true };
+      else { ui.measure.b = world; ui.measure.active = false; toast(`Mért távolság: ${fmtCm(Geometry.distance(ui.measure.a, ui.measure.b))}`, 5000); }
+      requestRender();
+      return;
     }
-    ctx.restore();
-  }
-
-  function drawPolygon(points, fill, stroke, lineWidth = 1, dashed = false) {
-    if (!points.length) return;
-    ctx.save();
-    ctx.beginPath();
-    ctx.moveTo(points[0].x, points[0].y);
-    points.slice(1).forEach(point => ctx.lineTo(point.x, point.y));
-    ctx.closePath();
-    if (fill) { ctx.fillStyle = fill; ctx.fill(); }
-    if (stroke) {
-      if (dashed) ctx.setLineDash([7 / view.z, 5 / view.z]);
-      ctx.strokeStyle = stroke;
-      ctx.lineWidth = Math.max(0.8 / view.z, lineWidth / view.z);
-      ctx.stroke();
+    const handle = hitHandle(point);
+    if (handle) {
+      const item = selectedItem();
+      drag = { type: handle.type === 'rotate' ? 'rotate' : 'resize', handle: handle.type, id: item.id, start: world, original: { ...item } };
+      return;
     }
-    ctx.restore();
-  }
+    const item = hitItem(world);
+    if (item) {
+      if (ui.selectedId !== item.id) select(item.id);
+      if (!item.locked) drag = { type: 'move', id: item.id, start: world, original: { x: item.x, y: item.y }, moved: false };
+      return;
+    }
+    select(null);
+    drag = { type: 'pan', start: point, view: { ...ui.view2d }, soft: true };
+  });
 
-  function polygonPath(points) {
-    ctx.beginPath();
-    ctx.moveTo(points[0].x, points[0].y);
-    points.slice(1).forEach(point => ctx.lineTo(point.x, point.y));
-    ctx.closePath();
-  }
-
-  function drawFloorSurface(points, material = 'oak-light') {
-    if (points.length < 3) return;
-    const styles = {
-      'oak-light': { base: '#ead9bd', light: '#f3e6cf', line: '#c9ad83', knot: '#b89164' },
-      'oak-natural': { base: '#d8b581', light: '#ead0a5', line: '#b28756', knot: '#8f673e' },
-      walnut: { base: '#9a7151', light: '#b88b65', line: '#755039', knot: '#5f3e2c' },
-      plain: { base: '#e9e5db', light: '#f4f1e9', line: '#d9d4c9', knot: '#c8c1b3' }
-    };
-    const style = styles[material] || styles['oak-light'];
-    const bounds = points.reduce((value, point) => ({
-      minX: Math.min(value.minX, point.x), minY: Math.min(value.minY, point.y),
-      maxX: Math.max(value.maxX, point.x), maxY: Math.max(value.maxY, point.y)
-    }), { minX: Infinity, minY: Infinity, maxX: -Infinity, maxY: -Infinity });
-    ctx.save();
-    polygonPath(points);
-    ctx.clip();
-    ctx.globalAlpha = mode === 'walls' || mode === 'calibrate' ? .58 : .94;
-    const wash = ctx.createLinearGradient(bounds.minX, bounds.minY, bounds.maxX, bounds.maxY);
-    wash.addColorStop(0, style.light); wash.addColorStop(.48, style.base); wash.addColorStop(1, style.light);
-    ctx.fillStyle = wash;
-    ctx.fillRect(bounds.minX, bounds.minY, bounds.maxX - bounds.minX, bounds.maxY - bounds.minY);
-    if (material !== 'plain') {
-      const plank = Math.max(28, 34 * (scale() || 2));
-      const board = plank * .28;
-      ctx.lineWidth = Math.max(.45 / view.z, .7);
-      ctx.strokeStyle = style.line;
-      ctx.globalAlpha *= .42;
-      for (let y = Math.floor(bounds.minY / board) * board; y <= bounds.maxY; y += board) {
-        drawLine(bounds.minX, y, bounds.maxX, y, style.line, .7 / view.z);
+  canvas.addEventListener('pointermove', event => {
+    const point = localPoint(event);
+    if (pointers.has(event.pointerId)) pointers.set(event.pointerId, point);
+    const world = toWorld(point);
+    ui.cursor = world;
+    updateCursorInfo(world);
+    if (!drag) {
+      if (ui.mode === 'furnish' && ui.tool === 'select') {
+        const handle = hitHandle(point);
+        const hover = handle ? null : hitItem(world);
+        canvas.style.cursor = handle ? (handle.type === 'rotate' ? 'grab' : 'nwse-resize') : hover ? (hover.locked ? 'not-allowed' : 'move') : 'default';
+        if ((hover?.id || null) !== ui.hoverId) { ui.hoverId = hover?.id || null; requestRender(); }
       }
-      let row = 0;
-      for (let y = Math.floor(bounds.minY / board) * board; y < bounds.maxY; y += board, row += 1) {
-        const offset = row % 2 ? plank * .48 : 0;
-        for (let x = Math.floor((bounds.minX - offset) / plank) * plank + offset; x <= bounds.maxX; x += plank) {
-          drawLine(x, y, x, y + board, style.line, .7 / view.z);
-          if ((row + Math.round(x / plank)) % 4 === 0) {
-            ctx.beginPath(); ctx.ellipse(x + plank * .28, y + board * .52, plank * .045, board * .12, 0, 0, Math.PI * 2);
-            ctx.strokeStyle = style.knot; ctx.stroke();
+      if (ui.tool === 'measure' && ui.measure?.active) { ui.measure.b = world; requestRender(); }
+      if (ui.mode === 'calibrate' && ui.calibration?.a && !ui.calibration.b) { ui.calibration.preview = world; }
+      return;
+    }
+    if (drag.type === 'pinch' && pointers.size === 2) {
+      const [p1, p2] = [...pointers.values()];
+      const distance = Math.hypot(p1.x - p2.x, p1.y - p2.y);
+      const center = { x: (p1.x + p2.x) / 2, y: (p1.y + p2.y) / 2 };
+      const factor = distance / drag.distance;
+      const base = baseZoom();
+      const z = clamp(drag.view.z * factor, base * 0.15, base * 14);
+      const worldAtStart = { x: (drag.center.x - drag.view.x) / drag.view.z, y: (drag.center.y - drag.view.y) / drag.view.z };
+      ui.view2d = { z, x: center.x - worldAtStart.x * z, y: center.y - worldAtStart.y * z };
+      requestRender();
+      return;
+    }
+    if (drag.type === 'pan') {
+      ui.view2d.x = drag.view.x + point.x - drag.start.x;
+      ui.view2d.y = drag.view.y + point.y - drag.start.y;
+      requestRender();
+      return;
+    }
+    const item = items().find(value => value.id === drag.id);
+    if (drag.type === 'move' && item) {
+      const dx = world.x - drag.start.x; const dy = world.y - drag.start.y;
+      if (!drag.moved && Math.hypot(dx, dy) * ui.view2d.z < 3) return;
+      drag.moved = true;
+      const snapped = applySnap({ ...item, x: drag.original.x + dx, y: drag.original.y + dy }, !event.altKey);
+      item.x = snapped.x; item.y = snapped.y;
+      ui.guides = snapped.guides || [];
+      updateInspectorPosition();
+      requestRender();
+    } else if (drag.type === 'rotate' && item) {
+      const center = Geometry.itemCenter(drag.original);
+      let angle = Math.atan2(world.y - center.y, world.x - center.x) * 180 / Math.PI + 90;
+      const step = layer('snapRotation') && !event.shiftKey ? 15 : 1;
+      angle = Math.round(angle / step) * step;
+      Object.assign(item, Geometry.rotateAboutCenter({ ...drag.original }, angle));
+      updateInspectorPosition();
+      requestRender();
+    } else if (drag.type === 'resize' && item) {
+      const o = drag.original;
+      const angle = rad(o.rot || 0);
+      const dxw = world.x - o.x; const dyw = world.y - o.y;
+      const local = { x: dxw * Math.cos(-angle) - dyw * Math.sin(-angle), y: dxw * Math.sin(-angle) + dyw * Math.cos(-angle) };
+      let left = 0; let top = 0; let right = o.w; let bottom = o.h;
+      const round = value => Math.round(value);
+      if (drag.handle.includes('r')) right = Math.max(5, round(local.x));
+      if (drag.handle.includes('b')) bottom = Math.max(5, round(local.y));
+      if (drag.handle.includes('l')) left = Math.min(o.w - 5, round(local.x));
+      if (drag.handle.includes('t') && drag.handle !== 'rotate') top = Math.min(o.h - 5, round(local.y));
+      const w = right - left; const h = bottom - top;
+      item.w = w; item.h = h;
+      item.x = o.x + left * Math.cos(angle) - top * Math.sin(angle);
+      item.y = o.y + left * Math.sin(angle) + top * Math.cos(angle);
+      updateInspectorPosition();
+      requestRender();
+    } else if (drag.type === 'vertex') {
+      const geom = geometry();
+      const vertex = geom?.vertices[drag.index];
+      if (vertex) {
+        let next = world;
+        if (!event.altKey) {
+          // Keep walls orthogonal when close to axis-aligned with neighbours
+          const n = geom.vertices.length;
+          for (const neighbour of [geom.vertices[(drag.index - 1 + n) % n], geom.vertices[(drag.index + 1) % n]]) {
+            if (!neighbour || neighbour === vertex) continue;
+            if (Math.abs(next.x - neighbour.x) * ui.view2d.z < 8) next = { ...next, x: neighbour.x };
+            if (Math.abs(next.y - neighbour.y) * ui.view2d.z < 8) next = { ...next, y: neighbour.y };
           }
+        }
+        vertex.x = next.x; vertex.y = next.y;
+        const n = geom.vertices.length;
+        geom.confirmedWalls[(drag.index - 1 + n) % n] = false;
+        geom.confirmedWalls[drag.index] = false;
+        requestRender();
+      }
+    } else if (drag.type === 'object') {
+      const geom = geometry();
+      const object = geom?.objects.find(value => value.id === drag.id);
+      if (object && !object.fullWall) {
+        const frame = Geometry.wallFrame(geom.vertices, object.wallIndex, 0);
+        if (frame) {
+          const nearest = Geometry.nearestPointOnSegment(world, frame.start, frame.end);
+          object.offset = clamp(Math.round(nearest.offset), object.width / 2, frame.length - object.width / 2);
+          object.estimated = false;
+          requestRender();
+          renderInspectorSoon();
         }
       }
     }
-    ctx.restore();
-  }
+  });
 
-  function drawDimensionLabel(start, end, label, color = '#245f4c') {
-    const midpoint = { x: (start.x + end.x) / 2, y: (start.y + end.y) / 2 };
-    ctx.save();
-    ctx.font = `700 ${12 / view.z}px system-ui`;
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
-    const width = ctx.measureText(label).width + 10 / view.z;
-    ctx.fillStyle = '#fffffff0';
-    ctx.fillRect(midpoint.x - width / 2, midpoint.y - 10 / view.z, width, 20 / view.z);
-    ctx.fillStyle = color;
-    ctx.fillText(label, midpoint.x, midpoint.y);
-    ctx.restore();
+  function endPointer(event) {
+    pointers.delete(event.pointerId);
+    if (!drag) return;
+    const type = drag.type;
+    if (type === 'move' && drag.moved) commit('Bútor áthelyezve');
+    else if (type === 'rotate') commit('Forgatás');
+    else if (type === 'resize') commit('Átméretezés');
+    else if (type === 'vertex') commit('Falpont mozgatása');
+    else if (type === 'object') commit('Nyílászáró mozgatása');
+    if (type === 'pan') canvas.style.cursor = ui.tool === 'pan' ? 'grab' : 'default';
+    drag = null;
+    ui.guides = [];
+    renderInspector();
+    requestRender();
   }
-
-  function drawArchitecture(geometry) {
-    for (const object of geometry.objects || []) {
-      const opening = Geometry.openingSegment(object, geometry.vertices);
-      if (!opening) continue;
-      const active = selectedArchitecture?.id === object.id;
-      if (object.type === 'door') {
-        const zoneCm = Geometry.doorClearancePolygon(object, geometry.vertices);
-        const zone = zoneCm.map(pointToWorld);
-        drawPolygon(zone, active ? '#df81652d' : '#dca58c1c', null);
-        const hinge = zone[0];
-        const closedEnd = zone[1];
-        const openEnd = zone.at(-1);
-        const a = pointToWorld(opening.a);
-        const b = pointToWorld(opening.b);
-        drawLine(a.x, a.y, b.x, b.y, '#f2e5cf', 9 / view.z);
-        ctx.save();
-        ctx.beginPath(); ctx.moveTo(closedEnd.x, closedEnd.y); zone.slice(2).forEach(point => ctx.lineTo(point.x, point.y));
-        ctx.strokeStyle = active ? '#bd5948' : '#b9836f'; ctx.lineWidth = 1.2 / view.z; ctx.setLineDash([5 / view.z, 4 / view.z]); ctx.stroke(); ctx.restore();
-        drawLine(hinge.x, hinge.y, openEnd.x, openEnd.y, active ? '#8f4034' : '#956354', 3 / view.z);
-        drawLine(hinge.x, hinge.y, closedEnd.x, closedEnd.y, '#c5a18b', 1 / view.z);
-        ctx.beginPath();
-        ctx.arc(hinge.x, hinge.y, 3.4 / view.z, 0, Math.PI * 2);
-        ctx.fillStyle = active ? '#a54438' : '#9c6959'; ctx.fill();
-      } else if (object.type === 'window') {
-        const a = pointToWorld(opening.a);
-        const b = pointToWorld(opening.b);
-        drawLine(a.x, a.y, b.x, b.y, '#f7f5ef', 10 / view.z);
-        drawLine(a.x, a.y, b.x, b.y, active ? '#277baa' : '#5d9db8', 6 / view.z);
-        drawLine(a.x, a.y, b.x, b.y, '#dff5f7', 2 / view.z);
-      } else if (object.type === 'radiator') {
-        const polygon = Geometry.radiatorPolygon(object, geometry.vertices).map(pointToWorld);
-        drawPolygon(polygon, active ? '#d7a47d' : '#e8d6c3', active ? '#985233' : '#a9866e', 1.5);
-        if (polygon.length === 4) {
-          for (let index = 1; index < 7; index += 1) {
-            const ratio = index / 7;
-            const a = { x: polygon[0].x + (polygon[1].x - polygon[0].x) * ratio, y: polygon[0].y + (polygon[1].y - polygon[0].y) * ratio };
-            const b = { x: polygon[3].x + (polygon[2].x - polygon[3].x) * ratio, y: polygon[3].y + (polygon[2].y - polygon[3].y) * ratio };
-            drawLine(a.x, a.y, b.x, b.y, '#b59175', .8 / view.z);
-          }
-        }
-      }
-    }
-  }
-
-  function drawRoomGeometry() {
-    const geometry = activeGeometry();
-    if (!geometry || !scale() || !geometry.vertices.length) return;
-    const points = geometry.vertices.map(pointToWorld);
-    if (geometry.closed && points.length >= 3) {
-      drawFloorSurface(points, geometry.floorMaterial || 'oak-light');
-      ctx.save();
-      polygonPath(points);
-      ctx.shadowColor = 'rgba(48,42,33,.28)'; ctx.shadowBlur = 9 / view.z; ctx.shadowOffsetY = 4 / view.z;
-      ctx.strokeStyle = '#6b716c'; ctx.lineWidth = 10 / view.z; ctx.lineJoin = 'round'; ctx.stroke();
-      ctx.shadowColor = 'transparent';
-      ctx.strokeStyle = '#f6f4ee'; ctx.lineWidth = 5.5 / view.z; ctx.stroke();
-      ctx.strokeStyle = '#b9bbb4'; ctx.lineWidth = 1 / view.z; ctx.stroke();
-      ctx.restore();
-    }
-    else {
-      ctx.save();
-      ctx.beginPath();
-      ctx.moveTo(points[0].x, points[0].y);
-      points.slice(1).forEach(point => ctx.lineTo(point.x, point.y));
-      ctx.strokeStyle = '#277769';
-      ctx.lineWidth = 4 / view.z;
-      ctx.lineCap = 'round'; ctx.lineJoin = 'round';
-      ctx.stroke();
-      ctx.restore();
-    }
-    const wallCount = geometry.closed ? points.length : Math.max(0, points.length - 1);
-    for (let index = 0; index < wallCount; index += 1) {
-      const start = points[index];
-      const end = points[(index + 1) % points.length];
-      const cm = Geometry.distance(geometry.vertices[index], geometry.vertices[(index + 1) % points.length]);
-      const confirmed = Boolean(geometry.confirmedWalls?.[index]);
-      drawDimensionLabel(start, end, `${confirmed ? '' : '≈ '}${cm.toFixed(1)} cm`, confirmed ? '#1d644b' : '#866528');
-    }
-    drawArchitecture(geometry);
-    if (mode !== 'walls') return;
-    for (let index = 0; index < points.length; index += 1) {
-      const point = points[index];
-      ctx.beginPath();
-      ctx.arc(point.x, point.y, (selectedVertex === index ? 7 : 5) / view.z, 0, Math.PI * 2);
-      ctx.fillStyle = selectedVertex === index ? '#f0a42d' : '#fff';
-      ctx.fill();
-      ctx.strokeStyle = '#21674f';
-      ctx.lineWidth = 2 / view.z;
-      ctx.stroke();
-    }
-  }
-
-  function clearanceDistance() {
-    if ($('clearance80').checked) return 80;
-    if ($('clearance70').checked) return 70;
-    return 0;
-  }
-
-  function drawClearanceGuide() {
-    const item = items().find(value => value.id === selected);
-    const margin = clearanceDistance();
-    if (!item || !margin || !scale()) return;
-    const polygon = Geometry.rotatedRectCorners(itemToCm(item), margin).map(pointToWorld);
-    drawPolygon(polygon, '#3e8bb20d', '#397c9f', 1.5, true);
-    drawDimensionLabel(polygon[0], polygon[1], `${margin} cm-es segédsáv`, '#397c9f');
-  }
-
-  function drawSnapGuides() {
-    if (!scale()) return;
-    for (const guide of snapGuides) {
-      ctx.save();
-      ctx.strokeStyle = guide.type === 'wall' ? '#19a67a' : guide.type === 'furniture' ? '#307fc4' : '#8573bd';
-      ctx.lineWidth = 1.5 / view.z;
-      ctx.setLineDash([7 / view.z, 4 / view.z]);
-      ctx.beginPath();
-      if (guide.a && guide.b) {
-        const a = pointToWorld(guide.a);
-        const b = pointToWorld(guide.b);
-        ctx.moveTo(a.x, a.y);
-        ctx.lineTo(b.x, b.y);
-      } else {
-        const point = pointToWorld({ x: guide.x, y: guide.y });
-        ctx.moveTo(point.x - 120 / view.z, point.y);
-        ctx.lineTo(point.x + 120 / view.z, point.y);
-        ctx.moveTo(point.x, point.y - 120 / view.z);
-        ctx.lineTo(point.x, point.y + 120 / view.z);
-      }
-      ctx.stroke();
-      ctx.restore();
-    }
-  }
-
-  function computeWarnings() {
-    const geometry = activeGeometry();
-    const warningMap = new Map();
-    warningItemIds = new Set();
-    if (!scale()) return [];
-    const centimetreItems = items().map(itemToCm);
-    for (const item of centimetreItems) {
-      const warnings = Geometry.analyzePlacement(item, centimetreItems, geometry, {
-        clearance: item.id === selected ? clearanceDistance() : 0
-      });
-      for (const warning of warnings) {
-        warningItemIds.add(item.id);
-        if (warning.id) warningItemIds.add(warning.id);
-        const key = warning.type === 'furniture'
-          ? `furniture-${[item.id, warning.id].sort().join('-')}`
-          : `${warning.type}-${item.id}-${warning.id || ''}-${warning.distance || ''}`;
-        const text = {
-          furniture: `A(z) „${item.name}” egy másik bútorral átfedésben van.`,
-          boundary: `A(z) „${item.name}” kilóg az aktív szobahatáron.`,
-          door: `A(z) „${item.name}” ajtónyitási területet metsz.`,
-          clearance: `A(z) „${item.name}” ${warning.distance} cm-es segédsávja bútort metsz.`
-        }[warning.type];
-        if (text) warningMap.set(key, text);
-      }
-    }
-    return [...warningMap.values()];
-  }
-
-  function renderWarnings(warnings) {
-    const container = $('warnings');
-    container.hidden = warnings.length === 0;
-    container.innerHTML = warnings.slice(0, 4).map(text => `<div>⚠ ${text}</div>`).join('');
-    if (warnings.length > 4) container.innerHTML += `<small>+${warnings.length - 4} további figyelmeztetés</small>`;
-  }
-
-  function drawItem(item) {
-    const size = furnitureSize(item);
-    ctx.save();
-    ctx.translate(item.x, item.y);
-    ctx.rotate(rad(item.rot));
-    art(item.type, size.w, size.h, item.source === 'ikea');
-    if (item.id === selected) {
-      ctx.save();
-      ctx.shadowColor = 'rgba(23,111,99,.32)'; ctx.shadowBlur = 10 / view.z;
-      ctx.strokeStyle = '#137568'; ctx.setLineDash([6 / view.z, 4 / view.z]); ctx.lineWidth = 2 / view.z;
-      ctx.strokeRect(-4 / view.z, -4 / view.z, size.w + 8 / view.z, size.h + 8 / view.z);
-      ctx.setLineDash([]);
-      for (const [x, y] of [[0, 0], [size.w, 0], [size.w, size.h], [0, size.h]]) {
-        ctx.beginPath(); ctx.arc(x, y, 3.5 / view.z, 0, Math.PI * 2); ctx.fillStyle = '#fff'; ctx.fill(); ctx.strokeStyle = '#137568'; ctx.lineWidth = 1.5 / view.z; ctx.stroke();
-      }
-      ctx.restore();
-    }
-    if (warningItemIds.has(item.id)) {
-      ctx.strokeStyle = '#c6563f';
-      ctx.lineWidth = 3 / view.z;
-      ctx.strokeRect(-5 / view.z, -5 / view.z, size.w + 10 / view.z, size.h + 10 / view.z);
-    }
-    ctx.restore();
-  }
-
-  function draw() {
-    const width = wrap.clientWidth;
-    const height = wrap.clientHeight;
-    const dpr = devicePixelRatio || 1;
-    const actualWidth = Math.round(width * dpr);
-    const actualHeight = Math.round(height * dpr);
-    if (canvas.width !== actualWidth || canvas.height !== actualHeight) {
-      canvas.width = actualWidth;
-      canvas.height = actualHeight;
-      canvas.style.width = `${width}px`;
-      canvas.style.height = `${height}px`;
-    }
-    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    ctx.clearRect(0, 0, width, height);
-    ctx.save();
-    ctx.translate(view.x, view.y);
-    ctx.scale(view.z, view.z);
-    const warnings = computeWarnings();
-    renderWarnings(warnings);
-    if (image) {
-      ctx.drawImage(image, 0, 0);
-      ctx.strokeStyle = '#cad8c8';
-      ctx.lineWidth = 1 / view.z;
-      ctx.strokeRect(0, 0, image.width, image.height);
-    }
-    if ($('showReference').checked && plan().reference) {
-      const reference = plan().reference;
-      ctx.save();
-      ctx.strokeStyle = '#cf443c';
-      ctx.lineWidth = 3 / view.z;
-      ctx.setLineDash([8 / view.z, 5 / view.z]);
-      ctx.beginPath(); ctx.moveTo(reference.x1, reference.y1); ctx.lineTo(reference.x2, reference.y2); ctx.stroke();
-      ctx.setLineDash([]);
-      ctx.fillStyle = '#9b302a';
-      ctx.font = `${15 / view.z}px sans-serif`;
-      ctx.fillText(reference.label, reference.x1, reference.y1 - 12 / view.z);
-      ctx.restore();
-    }
-    drawRoomGeometry();
-    items().forEach(drawItem);
-    drawClearanceGuide();
-    drawSnapGuides();
-    if (lastMeasurement) {
-      ctx.save();
-      ctx.strokeStyle = '#32816c';
-      ctx.lineWidth = 2 / view.z;
-      ctx.setLineDash([8 / view.z, 4 / view.z]);
-      ctx.beginPath();
-      ctx.moveTo(lastMeasurement.start.x, lastMeasurement.start.y);
-      ctx.lineTo(lastMeasurement.end.x, lastMeasurement.end.y);
-      ctx.stroke();
-      ctx.setLineDash([]);
-      drawDimensionLabel(lastMeasurement.start, lastMeasurement.end, `${lastMeasurement.cm.toFixed(1)} cm`, '#276b59');
-      ctx.restore();
-    }
-    if (lineStart && lineEnd) {
-      ctx.strokeStyle = mode === 'calibrate' ? '#e25f48' : '#32816c';
-      ctx.lineWidth = 3 / view.z;
-      ctx.setLineDash([10 / view.z, 5 / view.z]);
-      ctx.beginPath(); ctx.moveTo(lineStart.x, lineStart.y); ctx.lineTo(lineEnd.x, lineEnd.y); ctx.stroke();
-      ctx.setLineDash([]);
-      if (mode === 'measure' && scale()) {
-        drawDimensionLabel(lineStart, lineEnd, `${(Math.hypot(lineEnd.x - lineStart.x, lineEnd.y - lineStart.y) / scale()).toFixed(1)} cm`, '#276b59');
-      }
-    }
-    ctx.restore();
-    $('zoomLabel').textContent = `${Math.round(view.z * 100)}%`;
-    $('scaleInfo').textContent = scale()
-      ? `Becsült skála: 1 cm = ${scale().toFixed(2)} px · Az eredeti rajz nem mindenütt arányos!`
-      : '⚠ Méretarány kalibrálása szükséges a pontos bútorokhoz';
-  }
-
-  function fit() {
-    if (!image) return;
-    const width = wrap.clientWidth;
-    const height = wrap.clientHeight;
-    view.z = Math.min((width - 60) / image.width, (height - 60) / image.height);
-    view.x = (width - image.width * view.z) / 2;
-    view.y = (height - image.height * view.z) / 2;
-    draw();
-  }
-
-  function zoom(factor, at = { x: wrap.clientWidth / 2, y: wrap.clientHeight / 2 }) {
-    const origin = world(at);
-    view.z = clamp(view.z * factor, 0.15, 7);
-    view.x = at.x - origin.x * view.z;
-    view.y = at.y - origin.y * view.z;
-    draw();
-  }
-
-  function hit(point) {
-    for (const item of [...items()].reverse()) {
-      const size = furnitureSize(item);
-      const dx = point.x - item.x;
-      const dy = point.y - item.y;
-      const angle = -rad(item.rot);
-      const x = dx * Math.cos(angle) - dy * Math.sin(angle);
-      const y = dx * Math.sin(angle) + dy * Math.cos(angle);
-      if (x >= 0 && y >= 0 && x <= size.w && y <= size.h) return item;
-    }
-    return null;
-  }
-
-  function setMode(value) {
-    mode = value;
-    lineStart = lineEnd = null;
-    snapGuides = [];
-    if (value !== 'walls') selectedVertex = null;
-    if (value !== 'openings') { selectedArchitecture = null; openingTool = null; }
-    const buttons = { select: 'modeSelect', walls: 'modeWalls', openings: 'modeOpenings', measure: 'modeMeasure', calibrate: 'modeCalibrate', pan: 'modePan' };
-    Object.entries(buttons).forEach(([name, id]) => $(id).classList.toggle('selected', value === name));
-    const descriptions = {
-      select: ['Berendezés', 'Húzd a bútorokat; az igazítás és az ütközésjelzés nem akadályozza a szabad elhelyezést.'],
-      walls: ['Falak és méretek', 'Kattints sorban a falpontokra. A kép alapján számolt ≈ hosszt a jobb oldalon írd felül a biztosan ismert centiméterértékkel.'],
-      openings: ['Nyílászárók', 'Válassz ajtót, ablakot vagy radiátort, majd kattints a megfelelő fal közelébe.'],
-      measure: ['Mérés', 'Kattints két pontra. A mérés a kalibrált képet követi, ezért torz rajzon csak tájékoztató.'],
-      calibrate: ['Képi kalibrálás', 'Jelölj ki egy ismert képi szakaszt, majd add meg valós hosszát centiméterben.'],
-      pan: ['Nézet mozgatása', 'Húzd az alaprajzot a nézet mozgatásához.']
-    };
-    $('modeTitle').textContent = descriptions[value][0];
-    $('modeHelp').textContent = descriptions[value][1];
-    $('hintMode').textContent = descriptions[value][1];
-    $('geometryTools').hidden = !['walls', 'openings'].includes(value);
-    $('openingTools').hidden = value !== 'openings';
-    $('furnishTools').hidden = value !== 'select';
-    $('measureTools').hidden = value !== 'measure';
-    canvas.style.cursor = value === 'pan' ? 'grab' : ['calibrate', 'measure', 'walls', 'openings'].includes(value) ? 'crosshair' : 'default';
-    renderGeometryControls();
-    renderProps();
-    draw();
-  }
-
-  function renderGeometryControls() {
-    const select = $('geometrySelect');
-    select.innerHTML = '';
-    if (!geometries().length) {
-      const option = document.createElement('option');
-      option.textContent = 'Nincs szobageometria';
-      option.value = '';
-      select.append(option);
+  canvas.addEventListener('pointerup', endPointer);
+  canvas.addEventListener('pointercancel', endPointer);
+  canvas.addEventListener('contextmenu', event => event.preventDefault());
+  canvas.addEventListener('pointerleave', () => { ui.hoverId = null; updateCursorInfo(null); requestRender(); });
+  canvas.addEventListener('wheel', event => {
+    event.preventDefault();
+    if (event.ctrlKey || Math.abs(event.deltaY) >= Math.abs(event.deltaX)) {
+      const factor = Math.exp(-event.deltaY * (event.ctrlKey ? 0.012 : 0.0016));
+      zoomAt(factor, localPoint(event));
     } else {
-      for (const geometry of geometries()) {
-        const option = document.createElement('option');
-        option.value = geometry.id;
-        option.textContent = `${geometry.name}${geometry.closed ? ' · zárt' : ' · nyitott'}`;
-        select.append(option);
-      }
-      select.value = room().activeGeometryId || '';
+      ui.view2d.x -= event.deltaX; requestRender();
     }
-    $('closeGeometry').disabled = !activeGeometry() || activeGeometry().closed || activeGeometry().vertices.length < 3;
-    $('deleteGeometry').disabled = !activeGeometry();
-    $('floorMaterial').disabled = !activeGeometry();
-    $('floorMaterial').value = activeGeometry()?.floorMaterial || 'oak-light';
+  }, { passive: false });
+  canvas.addEventListener('dblclick', event => {
+    if (ui.mode !== 'walls') return;
+    const world = toWorld(localPoint(event));
+    const wall = hitWall(world);
+    if (wall) splitWall(wall.wallIndex, wall.point);
+  });
+
+  function updateCursorInfo(world) {
+    const geom = geometry();
+    const base = geom?.vertices.length ? Geometry.polygonBounds(geom.vertices) : { minX: 0, minY: 0 };
+    $('cursorInfo').textContent = world ? `x ${fmt(world.x - base.minX, 0)} · y ${fmt(world.y - base.minY, 0)} cm` : '';
   }
 
-  function renderRooms() {
-    const container = $('rooms');
-    container.innerHTML = '';
-    for (const roomPlan of allPlans()) {
-      const roomData = data.rooms[roomPlan.id];
-      if (!roomData) continue;
-      const row = document.createElement('div');
-      row.className = `room-row${roomId === roomPlan.id ? ' active' : ''}`;
+  // Drag & drop from the catalogue
+  const view2dNode = $('view2d');
+  view2dNode.addEventListener('dragover', event => {
+    if (!event.dataTransfer.types.includes('text/zuglak-product')) return;
+    event.preventDefault();
+    $('dropHint').hidden = false;
+  });
+  view2dNode.addEventListener('dragleave', event => { if (!view2dNode.contains(event.relatedTarget)) $('dropHint').hidden = true; });
+  view2dNode.addEventListener('drop', event => {
+    $('dropHint').hidden = true;
+    const key = event.dataTransfer.getData('text/zuglak-product');
+    if (!key) return;
+    event.preventDefault();
+    const product = productByKey(key);
+    if (!product) return;
+    const rect = canvas.getBoundingClientRect();
+    const world = toWorld({ x: event.clientX - rect.left, y: event.clientY - rect.top });
+    addProduct(product, world);
+  });
+
+  // ------------------------------------------------------------------ architecture editing
+  function startArchitecture(mode = 'walls') {
+    const geom = geometry();
+    if (!geom && mode !== 'draw') { mode = 'draw'; }
+    ui.mode = mode;
+    ui.selectedId = null;
+    ui.openingTool = null;
+    document.body.classList.remove('has-selection');
+    if (ui.view !== '2d') setView('2d');
+    renderModeBanner();
+    renderInspector();
+    renderRoomPanel();
+    fitView();
+  }
+
+  function finishArchitecture() {
+    ui.mode = 'furnish';
+    ui.selectedVertex = null; ui.selectedWall = null; ui.selectedObjectId = null; ui.openingTool = null; ui.calibration = null;
+    renderModeBanner();
+    renderInspector();
+    renderRoomPanel();
+    requestRender();
+  }
+
+  function renderModeBanner() {
+    const banner = $('modeBanner');
+    banner.hidden = ui.mode === 'furnish' || ui.presentation;
+    if (banner.hidden) return;
+    const texts = {
+      walls: ['Falak szerkesztése', 'Húzd a falpontokat · kattints egy falra a pontos hosszhoz · dupla kattintás: új pont'],
+      openings: ['Nyílászárók', 'Válassz elemet, majd kattints egy falra · a meglévőket húzással mozgathatod'],
+      draw: ['Új szobageometria', 'Kattints sorban a falpontokra; az első pontra kattintva zárul a poligon'],
+      calibrate: ['Alaprajzkép igazítása', 'Jelölj ki két pontot a rajzon, majd add meg a valós távolságot. Csak a háttérképet méretezi.']
+    };
+    $('modeBannerTitle').textContent = texts[ui.mode][0];
+    $('modeBannerHelp').textContent = texts[ui.mode][1];
+    const tools = $('modeBannerTools');
+    tools.innerHTML = '';
+    const addTool = (id, iconName, title, active, onClick) => {
       const button = document.createElement('button');
-      button.className = 'room';
-      const thumbnail = document.createElement('img');
-      thumbnail.src = roomPlan.url;
-      thumbnail.alt = '';
-      const label = document.createElement('span');
-      const labelName = document.createElement('strong');
-      const labelMeta = document.createElement('small');
-      labelName.textContent = roomData.name;
-      labelMeta.textContent = `${Object.keys(roomData.variants).length} változat · ${roomData.geometries?.length || 0} geometria`;
-      label.append(labelName, labelMeta);
-      button.append(thumbnail, label);
-      button.onclick = () => openRoom(roomPlan.id);
-      row.append(button);
-      if (roomPlan.isCustom) {
-        const remove = document.createElement('button');
-        remove.className = 'room-remove danger';
-        remove.title = 'Saját alaprajz törlése';
-        remove.textContent = '×';
-        remove.onclick = () => deleteCustomPlan(roomPlan.id);
-        row.append(remove);
-      }
-      container.append(row);
-    }
-  }
-
-  function deleteCustomPlan(id) {
-    const target = data.customPlans.find(value => value.id === id);
-    if (!target || !confirm(`Biztosan törlöd ezt a saját alaprajzot és minden berendezési változatát?\n\n${data.rooms[id]?.name || target.name}`)) return;
-    data.customPlans = data.customPlans.filter(value => value.id !== id);
-    delete data.rooms[id];
-    if (roomId === id) {
-      roomId = 'room1';
-      data.currentRoom = roomId;
-    }
-    save();
-    openRoom(roomId, false);
-  }
-
-  function catalogSvg(type, isIkea) {
-    const accent = isIkea ? '#244e3e' : '#7b806f';
-    const fill = isIkea ? '#e8eee5' : '#ece8df';
-    const common = `fill="${fill}" stroke="${accent}" stroke-width="1.4"`;
-    const artByType = {
-      sofa: `<rect x="5" y="8" width="60" height="42" rx="7" ${common}/><rect x="11" y="16" width="48" height="27" rx="5" fill="#fff" stroke="${accent}"/><path d="M26 17v25M44 17v25" stroke="${accent}" opacity=".45"/><path d="M8 10v38M62 10v38" stroke="${accent}" stroke-width="5"/>`,
-      armchair: `<rect x="15" y="7" width="40" height="45" rx="9" ${common}/><rect x="21" y="15" width="28" height="28" rx="5" fill="#fff" stroke="${accent}"/><path d="M17 9v40M53 9v40" stroke="${accent}" stroke-width="5"/>`,
-      bed: `<rect x="13" y="4" width="44" height="51" rx="4" ${common}/><rect x="17" y="11" width="17" height="12" rx="3" fill="#fff"/><rect x="36" y="11" width="17" height="12" rx="3" fill="#fff"/><rect x="17" y="27" width="36" height="23" rx="3" fill="#c7d7d0"/>`,
-      wardrobe: `<rect x="5" y="13" width="60" height="32" rx="3" ${common}/><path d="M25 14v30M45 14v30" stroke="${accent}"/><circle cx="22" cy="29" r="1.5" fill="${accent}"/><circle cx="42" cy="29" r="1.5" fill="${accent}"/>`,
-      chair: `<rect x="18" y="12" width="34" height="36" rx="7" ${common}/><path d="M20 18h30" stroke="${accent}" stroke-width="5"/>`,
-      stool: `<circle cx="35" cy="29" r="17" ${common}/><circle cx="35" cy="29" r="11" fill="#ead6b8" stroke="${accent}"/><circle cx="25" cy="39" r="2" fill="${accent}"/><circle cx="45" cy="39" r="2" fill="${accent}"/>`,
-      shelf: `<rect x="7" y="14" width="56" height="30" rx="3" ${common}/><path d="M21 15v28M35 15v28M49 15v28M8 29h54" stroke="${accent}"/>`,
-      dresser: `<rect x="7" y="14" width="56" height="30" rx="3" ${common}/><path d="M8 29h54M26 15v28M44 15v28" stroke="${accent}"/><circle cx="17" cy="23" r="1.5" fill="${accent}"/><circle cx="35" cy="23" r="1.5" fill="${accent}"/><circle cx="53" cy="23" r="1.5" fill="${accent}"/>`,
-      table: `<rect x="6" y="11" width="58" height="36" rx="7" fill="#d6b181" stroke="${accent}" stroke-width="1.4"/><path d="M18 12v34M30 12v34M42 12v34M54 12v34" stroke="#a98459" opacity=".55"/><circle cx="13" cy="18" r="3" fill="${accent}"/><circle cx="57" cy="18" r="3" fill="${accent}"/><circle cx="13" cy="40" r="3" fill="${accent}"/><circle cx="57" cy="40" r="3" fill="${accent}"/>`,
-      desk: `<rect x="6" y="11" width="58" height="36" rx="5" fill="#d6b181" stroke="${accent}" stroke-width="1.4"/><path d="M16 17h38M16 24h38" stroke="#a98459" opacity=".6"/><circle cx="13" cy="40" r="3" fill="${accent}"/><circle cx="57" cy="40" r="3" fill="${accent}"/>`,
-      coffee: `<rect x="8" y="14" width="54" height="30" rx="12" fill="#d6b181" stroke="${accent}" stroke-width="1.4"/><path d="M18 15v28M30 15v28M42 15v28M54 15v28" stroke="#a98459" opacity=".5"/>`,
-      rug: `<rect x="7" y="9" width="56" height="40" rx="5" fill="#d8c0a7" stroke="${accent}"/><path d="M12 17h46M12 25h46M12 33h46M12 41h46" stroke="#fff" opacity=".55"/><rect x="13" y="15" width="44" height="28" rx="3" fill="none" stroke="${accent}" stroke-dasharray="3 3"/>`,
-      plant: `<circle cx="35" cy="30" r="11" fill="#a77f58" stroke="${accent}"/><g fill="#4f865f"><ellipse cx="35" cy="15" rx="5" ry="13"/><ellipse cx="48" cy="22" rx="5" ry="13" transform="rotate(50 48 22)"/><ellipse cx="22" cy="22" rx="5" ry="13" transform="rotate(-50 22 22)"/><ellipse cx="47" cy="38" rx="5" ry="13" transform="rotate(120 47 38)"/><ellipse cx="23" cy="38" rx="5" ry="13" transform="rotate(-120 23 38)"/></g>`,
-      lamp: `<circle cx="35" cy="29" r="20" fill="#d8b970" stroke="${accent}" stroke-width="1.4"/><circle cx="35" cy="29" r="12" fill="#fff4cf" stroke="#a88a54"/><circle cx="35" cy="29" r="3" fill="${accent}"/>`,
-      tv: `<rect x="5" y="21" width="60" height="16" rx="3" fill="#263338" stroke="${accent}"/><path d="M35 37v7M25 44h20" stroke="${accent}"/>`,
-      bath: `<rect x="8" y="8" width="54" height="43" rx="18" fill="#eef7f7" stroke="${accent}"/><ellipse cx="35" cy="29" rx="19" ry="13" fill="#fff" stroke="#9bb5b7"/><circle cx="50" cy="29" r="2" fill="#8ca5a8"/>`,
-      sink: `<rect x="13" y="9" width="44" height="40" rx="14" fill="#eef7f7" stroke="${accent}"/><ellipse cx="35" cy="30" rx="13" ry="10" fill="#fff" stroke="#9bb5b7"/><circle cx="35" cy="16" r="2" fill="#8ca5a8"/>`
+      button.className = `tool${active ? ' selected' : ''}`;
+      button.title = title;
+      button.dataset.archTool = id;
+      button.innerHTML = icon(iconName);
+      button.onclick = onClick;
+      tools.append(button);
     };
-    return `<svg viewBox="0 0 70 58" aria-hidden="true">${artByType[type] || artByType.table}</svg>`;
-  }
-
-  function populateCategoryFilter() {
-    const select = $('catalogCategory');
-    const previous = select.value;
-    select.innerHTML = '<option value="all">Minden kategória</option>';
-    if (catalogTab !== 'basic') {
-      Object.entries(Ikea.categories).forEach(([value, label]) => {
-        const option = document.createElement('option');
-        option.value = value;
-        option.textContent = label;
-        select.append(option);
-      });
-      select.hidden = false;
-      select.value = [...select.options].some(option => option.value === previous) ? previous : 'all';
-    } else {
-      select.hidden = true;
-      select.value = 'all';
-    }
-  }
-
-  function isFavorite(productId) {
-    return favorites.some(value => value.productId === productId);
-  }
-
-  function toggleFavorite(product) {
-    const normalized = Core.normalizeProduct(product);
-    if (isFavorite(normalized.productId)) favorites = favorites.filter(value => value.productId !== normalized.productId);
-    else favorites = [...favorites, normalized];
-    try {
-      favorites = Core.saveFavorites(localStorage, favorites);
-      renderCatalog();
-      flash(isFavorite(normalized.productId) ? 'Hozzáadva a kedvencekhez.' : 'Eltávolítva a kedvencekből.');
-    } catch {
-      flash('A kedvencek mentése nem sikerült.');
-    }
-  }
-
-  function renderCatalog() {
-    const container = $('catalog');
-    const query = ($('catalogSearch').value || '').toLocaleLowerCase('hu').trim();
-    const category = $('catalogCategory').value || 'all';
-    const source = catalogTab === 'ikea' ? Ikea.products : catalogTab === 'favorites' ? favorites : BASIC_CATALOG;
-    const filtered = source.filter(product => {
-      const haystack = `${product.name} ${product.productId || ''} ${product.type || ''}`.toLocaleLowerCase('hu');
-      return haystack.includes(query) && (category === 'all' || product.category === category);
-    });
-
-    container.innerHTML = '';
-    for (const product of filtered) {
-      const isIkea = catalogTab !== 'basic';
-      const card = document.createElement('article');
-      card.className = `catalog-card${isIkea ? ' ikea-card' : ''}`;
-      const add = document.createElement('button');
-      add.className = 'catalog-add';
-      add.innerHTML = `${catalogSvg(product.type, isIkea)}<strong></strong><small></small>`;
-      add.querySelector('strong').textContent = product.name;
-      add.querySelector('small').textContent = `${product.width} × ${product.depth} cm${product.productId ? ` · ${product.productId}` : ''}`;
-      add.onclick = () => isIkea ? addProduct(product) : addBasicItem(product);
-      card.append(add);
-      if (isIkea) {
-        const favorite = document.createElement('button');
-        favorite.className = `favorite-button${isFavorite(product.productId) ? ' active' : ''}`;
-        favorite.title = isFavorite(product.productId) ? 'Eltávolítás a kedvencekből' : 'Mentés a kedvencekhez';
-        favorite.setAttribute('aria-label', favorite.title);
-        favorite.textContent = isFavorite(product.productId) ? '♥' : '♡';
-        favorite.onclick = () => toggleFavorite(product);
-        card.append(favorite);
-      }
-      container.append(card);
-    }
-    $('catalogCount').textContent = `${filtered.length} darab`;
-    $('favoriteCount').textContent = favorites.length;
-    $('catalogEmpty').hidden = filtered.length > 0;
-    document.querySelectorAll('[data-catalog-tab]').forEach(button => {
-      const active = button.dataset.catalogTab === catalogTab;
-      button.classList.toggle('selected', active);
-      button.setAttribute('aria-selected', String(active));
-    });
-  }
-
-  function addBasicItem(product) {
-    const center = world({ x: wrap.clientWidth / 2, y: wrap.clientHeight / 2 });
-    const value = scale() || 2;
-    const item = {
-      id: idFactory(), type: product.type, name: product.name, w: product.width, h: product.depth,
-      rot: 0, x: center.x - product.width * value / 2, y: center.y - product.depth * value / 2
-    };
-    items().push(item);
-    selected = item.id;
-    save();
-    renderProps();
-    draw();
-    flash(`Hozzáadva: ${product.name}`);
-  }
-
-  function addProduct(product) {
-    try {
-      const center = world({ x: wrap.clientWidth / 2, y: wrap.clientHeight / 2 });
-      const value = scale() || 2;
-      const item = Core.createFurnitureItem(product, {
-        x: center.x - Number(product.width) * value / 2,
-        y: center.y - Number(product.depth) * value / 2
-      }, idFactory);
-      items().push(item);
-      selected = item.id;
-      save();
-      renderProps();
-      draw();
-      flash(`Hozzáadva: ${product.name} · ${product.width} × ${product.depth} cm`);
-    } catch (error) {
-      flash(error.message || 'A termék nem adható hozzá.');
-    }
-  }
-
-  function renderVariants() {
-    const select = $('variant');
-    select.innerHTML = '';
-    Object.keys(room().variants).forEach(name => {
-      const option = document.createElement('option');
-      option.value = name;
-      option.textContent = name;
-      select.append(option);
-    });
-    select.value = room().active;
-  }
-
-  function propertyField(container, label, value, onChange, options = {}) {
-    const box = document.createElement('div');
-    box.className = 'field';
-    const fieldLabel = document.createElement('label');
-    fieldLabel.textContent = label;
-    const input = options.values ? document.createElement('select') : document.createElement('input');
-    if (options.values) {
-      for (const [optionValue, optionLabel] of options.values) {
-        const option = document.createElement('option');
-        option.value = optionValue;
-        option.textContent = optionLabel;
-        input.append(option);
-      }
-    } else {
-      input.type = options.type || 'number';
-      if (input.type === 'number') {
-        input.min = options.min ?? '0.1';
-        input.max = options.max ?? '5000';
-        input.step = options.step || '0.1';
+    if (ui.mode === 'walls' || ui.mode === 'openings') {
+      addTool('walls', 'wall', 'Falpontok', ui.mode === 'walls', () => { ui.mode = 'walls'; ui.openingTool = null; renderModeBanner(); renderInspector(); requestRender(); });
+      for (const [type, iconName, title] of [['door', 'door', 'Ajtó'], ['window', 'window', 'Ablak'], ['radiator', 'radiator', 'Radiátor'], ['opening', 'opening', 'Nyílás (fal nélkül)']]) {
+        addTool(type, iconName, title, ui.mode === 'openings' && ui.openingTool === type, () => { ui.mode = 'openings'; ui.openingTool = ui.openingTool === type ? null : type; renderModeBanner(); renderInspector(); requestRender(); });
       }
     }
-    input.value = value ?? '';
-    input.addEventListener('change', () => {
-      const next = input.tagName === 'SELECT' || input.type === 'text' ? input.value.trim() : Number(input.value);
-      if ((input.type === 'number' && (!Number.isFinite(next) || (!options.allowZero && next <= 0))) || (input.type === 'text' && !next)) {
-        input.value = value ?? '';
+  }
+
+  function architecturePointerDown(world, point) {
+    const geom = geometry();
+    if (ui.mode === 'calibrate') {
+      if (!ui.calibration?.a || ui.calibration.b) ui.calibration = { a: world };
+      else {
+        ui.calibration.b = world;
+        requestRender();
+        const imagePx = Geometry.distance(ui.calibration.a, ui.calibration.b) * Number(room().pxPerCm);
+        ask('Alaprajzkép méretaránya', 'A kijelölt szakasz valós hossza. Ez csak a háttérkép méretét változtatja, a falakat és bútorokat nem.', [
+          { key: 'cm', label: 'Valós hossz (cm)', value: '100', type: 'number' }
+        ]).then(answer => {
+          const cm = Number(answer?.cm);
+          if (cm > 0 && imagePx > 1) {
+            room().pxPerCm = imagePx / cm;
+            commit('Képkalibráció');
+            toast(`Háttérkép skálája: 1 cm = ${fmt(room().pxPerCm, 3)} px`);
+          }
+          ui.calibration = null;
+          finishArchitecture();
+        });
+      }
+      requestRender();
+      return;
+    }
+    if (ui.mode === 'draw') {
+      let target = geom;
+      if (!target || target.closed) {
+        target = { id: idFactory(), name: `Saját geometria ${geometries().length + 1}`, source: 'user', vertices: [], closed: false, confirmedWalls: [], objects: [], partitions: [], wallLabels: [], wallNotes: [] };
+        geometries().push(target);
+        room().activeGeometryId = target.id;
+      }
+      const vertexIndex = hitVertex(point);
+      if (vertexIndex === 0 && target.vertices.length >= 3) {
+        if (Geometry.polygonSelfIntersects(target.vertices, true)) { toast('A poligon önmetsző, így nem zárható.'); return; }
+        target.closed = true;
+        target.confirmedWalls = target.vertices.map(() => false);
+        commit('Geometria lezárása');
+        ui.mode = 'walls';
+        renderModeBanner(); renderRoomPanel(); renderInspector(); requestRender();
+        toast('A geometria lezárva. A falhosszakat a jobb oldali panelen pontosíthatod.');
         return;
       }
-      onChange(next);
-    });
-    box.append(fieldLabel, input);
-    container.append(box);
-    return input;
-  }
-
-  function renderGeometryProps(container) {
-    const geometry = activeGeometry();
-    if (!geometry) {
-      container.innerHTML = '<div class="property-empty"><strong>Nincs aktív szobageometria</strong><p class="hint">Hozz létre egy geometriát, majd kattints sorban a falak végpontjaira.</p></div>';
-      return;
-    }
-    const summary = document.createElement('div');
-    summary.className = 'geometry-summary';
-    summary.innerHTML = `<strong></strong><small>${geometry.vertices.length} falpont · ${geometry.closed ? 'zárt poligon' : 'nyitott vonal'}</small>`;
-    summary.querySelector('strong').textContent = geometry.name;
-    container.append(summary);
-    propertyField(container, 'Geometria neve', geometry.name, value => {
-      geometry.name = value;
-      save(); renderGeometryControls(); renderProps();
-    }, { type: 'text' });
-    if (selectedVertex !== null && geometry.vertices[selectedVertex]) {
-      const vertex = geometry.vertices[selectedVertex];
-      const title = document.createElement('h3');
-      title.textContent = `${selectedVertex + 1}. falpont`;
-      container.append(title);
-      for (const axis of ['x', 'y']) {
-        propertyField(container, `${axis.toUpperCase()} koordináta (cm)`, vertex[axis].toFixed(1), value => {
-          vertex[axis] = value;
-          const previousWall = (selectedVertex - 1 + geometry.vertices.length) % geometry.vertices.length;
-          geometry.confirmedWalls[previousWall] = false;
-          geometry.confirmedWalls[selectedVertex] = false;
-          save(); renderProps(); draw();
-        }, { allowZero: true });
+      let next = world;
+      const last = target.vertices.at(-1);
+      if (last) {
+        if (Math.abs(next.x - last.x) * ui.view2d.z < 10) next = { ...next, x: last.x };
+        if (Math.abs(next.y - last.y) * ui.view2d.z < 10) next = { ...next, y: last.y };
       }
-    }
-    const heading = document.createElement('h3');
-    heading.textContent = 'Falhosszak';
-    container.append(heading);
-    const count = geometry.closed ? geometry.vertices.length : Math.max(0, geometry.vertices.length - 1);
-    if (!count) {
-      const hint = document.createElement('p');
-      hint.className = 'hint';
-      hint.textContent = 'Kattints a tervre az első két falpont megadásához.';
-      container.append(hint);
-    }
-    for (let index = 0; index < count; index += 1) {
-      const next = (index + 1) % geometry.vertices.length;
-      const measured = Geometry.distance(geometry.vertices[index], geometry.vertices[next]);
-      const row = document.createElement('div');
-      row.className = 'wall-length-row';
-      const label = document.createElement('label');
-      label.textContent = `${index + 1}. fal ${geometry.confirmedWalls[index] ? '✓ pontos' : '≈ kép alapján'}`;
-      const input = document.createElement('input');
-      input.type = 'number'; input.min = '0.1'; input.max = '5000'; input.step = '0.1'; input.value = measured.toFixed(1);
-      input.addEventListener('change', () => {
-        try {
-          geometry.vertices = Geometry.setWallLength(geometry.vertices, index, input.value, geometry.closed);
-          geometry.confirmedWalls[index] = true;
-          if (geometry.closed || index + 1 < geometry.vertices.length - 1) geometry.confirmedWalls[next] = false;
-          save(); renderProps(); draw();
-        } catch (error) {
-          flash(error.message);
-          input.value = measured.toFixed(1);
-        }
-      });
-      row.append(label, input);
-      container.append(row);
-    }
-    const note = document.createElement('p');
-    note.className = 'hint geometry-note';
-    note.textContent = '≈ = a kalibrált képből számolt, nem megerősített hossz. A pontos érték beírása elmozdítja a szakasz végpontját, így a torz rajz kézzel korrigálható.';
-    container.append(note);
-  }
-
-  function renderArchitectureProps(container) {
-    const geometry = activeGeometry();
-    const object = geometry?.objects?.find(value => value.id === selectedArchitecture?.id);
-    if (!object) {
-      container.innerHTML = '<p class="hint">Válassz egy eszközt fent, majd kattints egy fal közelébe; vagy kattints egy meglévő nyílászáróra.</p>';
+      target.vertices.push({ id: idFactory(), x: Math.round(next.x * 10) / 10, y: Math.round(next.y * 10) / 10 });
+      commit('Falpont hozzáadása');
+      renderRoomPanel();
+      requestRender();
       return;
     }
-    const names = { door: 'Ajtó', window: 'Ablak', radiator: 'Radiátor' };
-    const summary = document.createElement('div');
-    summary.className = `architecture-summary ${object.type}`;
-    summary.innerHTML = `<strong>${names[object.type]}</strong><small>${object.wallIndex + 1}. falon</small>`;
-    container.append(summary);
-    propertyField(container, 'Megnevezés', object.name || names[object.type], value => { object.name = value; save(); renderProps(); draw(); }, { type: 'text' });
-    propertyField(container, 'Szélesség (cm)', object.width, value => {
-      const wall = Geometry.wallFrame(geometry.vertices, object.wallIndex, object.offset);
-      if (!wall || value > wall.length) {
-        flash('Az elem szélessége nem lehet nagyobb a falszakasznál.');
-        renderProps();
+    if (!geom) return;
+    if (ui.mode === 'walls') {
+      const vertexIndex = hitVertex(point);
+      if (vertexIndex >= 0) {
+        ui.selectedVertex = vertexIndex; ui.selectedWall = null;
+        drag = { type: 'vertex', index: vertexIndex };
+        renderInspector(); requestRender();
         return;
       }
-      object.width = value;
-      object.offset = clamp(object.offset, value / 2, Math.max(value / 2, wall.length - value / 2));
-      save(); renderProps(); draw();
-    });
-    propertyField(container, 'Pozíció a fal kezdetétől (cm)', object.offset, value => {
-      const wall = Geometry.wallFrame(geometry.vertices, object.wallIndex, value);
-      object.offset = wall ? clamp(value, object.width / 2, Math.max(object.width / 2, wall.length - object.width / 2)) : value;
-      save(); renderProps(); draw();
-    });
-    if (object.type === 'door') {
-      propertyField(container, 'Zsanér', object.hinge, value => { object.hinge = value; save(); draw(); }, { values: [['start', 'Bal / falszakasz eleje'], ['end', 'Jobb / falszakasz vége']] });
-      propertyField(container, 'Nyitási irány', object.swing, value => { object.swing = value; save(); draw(); }, { values: [['in', 'A szoba belseje felé'], ['out', 'A szobából kifelé']] });
-    } else {
-      if (object.type === 'radiator') propertyField(container, 'Mélység (cm)', object.depth, value => { object.depth = value; save(); draw(); });
-      propertyField(container, 'Magasság (cm)', object.height, value => { object.height = value; save(); draw(); });
-    }
-    const remove = document.createElement('button');
-    remove.className = 'wide danger';
-    remove.textContent = `${names[object.type]} törlése`;
-    remove.onclick = () => {
-      geometry.objects = geometry.objects.filter(value => value.id !== object.id);
-      selectedArchitecture = null;
-      save(); renderProps(); draw();
-    };
-    container.append(remove);
-  }
-
-  function renderProps() {
-    const container = $('props');
-    const item = items().find(value => value.id === selected);
-    container.innerHTML = '';
-    if (mode === 'walls') { renderGeometryProps(container); return; }
-    if (mode === 'openings') { renderArchitectureProps(container); return; }
-    if (!item) {
-      container.innerHTML = '<p class="hint">Válassz egy bútort a terven, vagy adj hozzá egyet a bal oldali katalógusból.</p>';
+      const wall = hitWall(world);
+      ui.selectedVertex = null;
+      ui.selectedWall = wall ? wall.wallIndex : null;
+      renderInspector(); renderRoomPanel(); requestRender();
       return;
     }
-
-    if (item.source === 'ikea') {
-      const metadata = document.createElement('div');
-      metadata.className = 'product-meta';
-      const changed = item.originalDimensions && (item.w !== item.originalDimensions.width || item.h !== item.originalDimensions.depth);
-      metadata.innerHTML = '<span class="ikea-badge">IKEA</span><strong></strong><small></small>';
-      metadata.querySelector('strong').textContent = item.productId || 'Cikkszám nélkül';
-      metadata.querySelector('small').textContent = item.originalDimensions
-        ? `Eredeti méret: ${item.originalDimensions.width} × ${item.originalDimensions.depth} cm${item.originalDimensions.height ? ` · M ${item.originalDimensions.height} cm` : ''}`
-        : 'Importált termék';
-      if (changed) {
-        const warning = document.createElement('em');
-        warning.textContent = 'A terven átméretezve';
-        metadata.append(warning);
+    if (ui.mode === 'openings') {
+      const object = hitObject(world);
+      if (object && !ui.openingTool) {
+        ui.selectedObjectId = object.id;
+        drag = { type: 'object', id: object.id };
+        renderInspector(); requestRender();
+        return;
       }
-      container.append(metadata);
+      if (ui.openingTool) { addOpeningAt(world); return; }
+      ui.selectedObjectId = object?.id || null;
+      renderInspector(); requestRender();
     }
+  }
 
-    const addField = (label, key, type = 'number', step = '1') => {
-      const box = document.createElement('div');
-      box.className = 'field';
-      const fieldLabel = document.createElement('label');
-      fieldLabel.textContent = label;
-      const input = document.createElement('input');
-      input.type = type;
-      input.value = item[key];
-      if (type === 'number') {
-        input.min = key === 'rot' ? '-360' : '0.1';
-        input.max = key === 'rot' ? '360' : '5000';
-        input.step = step;
-      }
-      input.addEventListener('change', () => {
-        const value = type === 'number' ? Number(input.value) : input.value.trim();
-        if ((type === 'number' && (!Number.isFinite(value) || (key !== 'rot' && value <= 0))) || (type === 'text' && !value)) {
-          input.value = item[key];
+  function addOpeningAt(world) {
+    const geom = geometry();
+    if (!geom?.closed) { toast('Nyílászáróhoz előbb zárt szobageometria kell.'); return; }
+    const nearest = Geometry.nearestWall(world, geom.vertices, true);
+    if (!nearest || nearest.distance > Math.max(thickness() + 10, 24 / ui.view2d.z)) { toast('Kattints közelebb egy falhoz.'); return; }
+    const defaultsByType = {
+      door: { name: 'Ajtó', width: 90, hinge: 'start', swing: 'in' },
+      window: { name: 'Ablak', width: 120, height: 140, sill: 85 },
+      radiator: { name: 'Radiátor', width: 80, depth: 10, height: 60 },
+      opening: { name: 'Nyílás', width: 90 }
+    };
+    const base = defaultsByType[ui.openingTool];
+    const width = Math.min(base.width, nearest.length);
+    const object = { id: idFactory(), type: ui.openingTool, wallIndex: nearest.wallIndex, ...base, width, offset: clamp(nearest.offset, width / 2, nearest.length - width / 2) };
+    geom.objects.push(object);
+    ui.selectedObjectId = object.id;
+    ui.openingTool = null;
+    commit('Nyílászáró hozzáadása');
+    renderModeBanner(); renderInspector(); requestRender();
+    toast(`${base.name} elhelyezve – a méretek a jobb oldalon pontosíthatók.`);
+  }
+
+  function splitWall(index, point) {
+    const geom = geometry();
+    if (!geom) return;
+    const a = geom.vertices[index];
+    const b = geom.vertices[(index + 1) % geom.vertices.length];
+    const p = point || { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
+    geom.vertices.splice(index + 1, 0, { id: idFactory(), x: p.x, y: p.y });
+    geom.confirmedWalls.splice(index, 1, false, false);
+    geom.wallLabels.splice(index, 1, null, null);
+    geom.wallNotes.splice(index, 1, '', '');
+    for (const object of geom.objects) if (object.wallIndex > index) object.wallIndex += 1;
+    commit('Fal felosztása');
+    ui.selectedVertex = index + 1; ui.selectedWall = null;
+    renderInspector(); renderRoomPanel(); requestRender();
+  }
+
+  function deleteVertex(index) {
+    const geom = geometry();
+    if (!geom || geom.vertices.length <= 3) { toast('Legalább három falpont szükséges.'); return; }
+    geom.vertices.splice(index, 1);
+    const n = geom.vertices.length + 1;
+    const prev = (index - 1 + n) % n;
+    geom.confirmedWalls.splice(index, 1); geom.confirmedWalls[Math.min(prev, geom.confirmedWalls.length - 1)] = false;
+    geom.wallLabels.splice(index, 1); geom.wallNotes.splice(index, 1);
+    geom.objects = geom.objects.filter(object => object.wallIndex !== index && object.wallIndex !== prev);
+    for (const object of geom.objects) if (object.wallIndex > index) object.wallIndex -= 1;
+    if (Geometry.polygonSelfIntersects(geom.vertices, geom.closed)) toast('Figyelem: a geometria önmetsző lett.');
+    ui.selectedVertex = null;
+    commit('Falpont törlése');
+    renderInspector(); renderRoomPanel(); requestRender();
+  }
+
+  function setWallLength(index, value, confirm = true) {
+    const geom = geometry();
+    try {
+      geom.vertices = Geometry.setWallLength(geom.vertices, index, value, geom.closed);
+      geom.confirmedWalls[index] = confirm;
+      const next = (index + 1) % geom.vertices.length;
+      if (geom.closed || index + 1 < geom.vertices.length - 1) geom.confirmedWalls[next] = false;
+      commit('Falhossz');
+      renderInspector(); renderRoomPanel(); requestRender();
+    } catch (error) { toast(error.message); }
+  }
+
+  // ------------------------------------------------------------------ dialogs
+  // One shared confirm/prompt dialog. Cancel / Esc always closes it (the form is
+  // `novalidate`, Mégse is `formnovalidate`); only "Rendben" (also Enter) is validated,
+  // with Hungarian messages instead of browser bubbles that would block closing.
+  let pendingAsk = null;
+  function fieldProblem(input) {
+    const label = input.dataset.label || 'Mező';
+    const v = input.validity;
+    if (v.badInput) return `${label}: számot adj meg.`;
+    if (v.valueMissing) return `${label}: kitöltése kötelező.`;
+    if (v.rangeUnderflow) return `${label}: legalább ${input.min.replace('.', ',')}.`;
+    if (v.rangeOverflow) return `${label}: legfeljebb ${input.max.replace('.', ',')}.`;
+    if (!v.valid) return `${label}: érvénytelen érték.`;
+    if (input.dataset.trim && !input.value.trim()) return `${label}: kitöltése kötelező.`;
+    return '';
+  }
+  function setupAskDialog() {
+    const dialog = $('dialog');
+    $('dialogForm').addEventListener('submit', event => {
+      if (event.submitter?.value === 'cancel') return;
+      for (const input of $('dialogFields').querySelectorAll('input,select')) {
+        const problem = fieldProblem(input);
+        if (problem) {
+          event.preventDefault();
+          $('dialogError').textContent = problem;
+          $('dialogError').hidden = false;
+          input.focus(); input.select?.();
           return;
         }
-        item[key] = value;
-        save();
-        renderProps();
-        draw();
-      });
-      box.append(fieldLabel, input);
-      container.append(box);
-    };
-
-    addField('Megnevezés', 'name', 'text');
-    addField('Szélesség (cm)', 'w');
-    addField('Mélység (cm)', 'h');
-    addField('Forgatás (°)', 'rot');
-
-    if (item.source === 'ikea') {
-      const links = document.createElement('div');
-      links.className = 'product-links';
-      const productLink = document.createElement('a');
-      productLink.href = item.productUrl;
-      productLink.target = '_blank';
-      productLink.rel = 'noopener noreferrer';
-      productLink.textContent = 'Termékoldal ↗';
-      const product = {
-        name: item.name, productId: item.productId, category: item.category || 'storage', type: item.type,
-        width: item.originalDimensions?.width || item.w, depth: item.originalDimensions?.depth || item.h,
-        height: item.originalDimensions?.height, productUrl: item.productUrl
-      };
-      const favorite = document.createElement('button');
-      favorite.textContent = isFavorite(item.productId) ? '♥ Kedvenc' : '♡ Kedvencekhez';
-      favorite.onclick = () => toggleFavorite(product);
-      links.append(productLink, favorite);
-      container.append(links);
-    }
-
-    const buttons = document.createElement('div');
-    buttons.className = 'small-actions';
-    const rotate = document.createElement('button');
-    rotate.textContent = '↻ 90°';
-    rotate.onclick = () => {
-      item.rot = (item.rot + 90) % 360;
-      save(); renderProps(); draw();
-    };
-    const duplicate = document.createElement('button');
-    duplicate.textContent = '⧉ Másolat';
-    duplicate.onclick = () => duplicateSelected();
-    const remove = document.createElement('button');
-    remove.textContent = 'Törlés';
-    remove.className = 'danger';
-    remove.onclick = removeSelected;
-    buttons.append(rotate, duplicate, remove);
-    container.append(buttons);
-  }
-
-  function duplicateSelected() {
-    const item = items().find(value => value.id === selected);
-    if (!item) return;
-    const copy = structuredClone(item);
-    copy.id = idFactory();
-    copy.x += 28;
-    copy.y += 28;
-    items().push(copy);
-    selected = copy.id;
-    save(); renderProps(); draw();
-  }
-
-  function removeSelected() {
-    if (!selected) return;
-    room().variants[room().active].items = items().filter(item => item.id !== selected);
-    selected = null;
-    save(); renderProps(); draw();
-  }
-
-  async function createGeometry() {
-    if (!scale()) {
-      flash('Előbb kalibráld az alaprajzot egy ismert szakasz alapján.');
-      setMode('calibrate');
-      return;
-    }
-    const answer = await ask('Új szobageometria', 'A falpontokat centiméterben tároljuk. A képi aránytalanságokat ezután a pontos falhosszakkal javíthatod.', [
-      { key: 'name', label: 'Geometria neve', value: `Geometria ${geometries().length + 1}` }
-    ]);
-    if (!answer?.name?.trim()) return;
-    const geometry = { id: idFactory(), name: answer.name.trim(), vertices: [], closed: false, confirmedWalls: [], objects: [] };
-    geometries().push(geometry);
-    room().activeGeometryId = geometry.id;
-    selectedVertex = null;
-    selectedArchitecture = null;
-    save(); renderGeometryControls(); renderProps(); draw();
-    flash('Kattints sorban a falak végpontjaira. A poligon legalább három ponttal zárható.');
-  }
-
-  function closeActiveGeometry() {
-    const geometry = activeGeometry();
-    if (!geometry || geometry.closed || geometry.vertices.length < 3) return;
-    if (Geometry.polygonSelfIntersects(geometry.vertices, true)) {
-      flash('A poligon önmetsző, ezért nem zárható. Mozgasd vagy töröld a hibás falpontot.');
-      return;
-    }
-    geometry.closed = true;
-    while (geometry.confirmedWalls.length < geometry.vertices.length) geometry.confirmedWalls.push(false);
-    save(); renderGeometryControls(); renderProps(); draw();
-    flash('A szobapoligon bezárva. A ≈ jelű falhosszakat ellenőrizd és írd át a pontos értékre.');
-  }
-
-  function hitVertexAt(worldPoint) {
-    const geometry = activeGeometry();
-    if (!geometry || !scale()) return -1;
-    const threshold = 12 / view.z;
-    let best = -1;
-    let bestDistance = Infinity;
-    geometry.vertices.forEach((vertex, index) => {
-      const point = pointToWorld(vertex);
-      const value = Math.hypot(worldPoint.x - point.x, worldPoint.y - point.y);
-      if (value <= threshold && value < bestDistance) { best = index; bestDistance = value; }
+      }
     });
-    return best;
+    $('dialogFields').addEventListener('input', () => { $('dialogError').hidden = true; });
+    dialog.addEventListener('close', settleAsk);
   }
-
-  function hitArchitectureAt(worldPoint) {
-    const geometry = activeGeometry();
-    if (!geometry || !scale()) return null;
-    const point = pointToCm(worldPoint);
-    const threshold = 10 / (view.z * scale());
-    let best = null;
-    for (const object of geometry.objects || []) {
-      let value = Infinity;
-      if (object.type === 'radiator') {
-        const polygon = Geometry.radiatorPolygon(object, geometry.vertices);
-        if (Geometry.pointInPolygon(point, polygon, true)) value = 0;
-        else for (const [a, b] of Geometry.polygonEdges(polygon)) value = Math.min(value, Geometry.nearestPointOnSegment(point, a, b).distance);
-      } else {
-        const opening = Geometry.openingSegment(object, geometry.vertices);
-        if (opening) value = Geometry.nearestPointOnSegment(point, opening.a, opening.b).distance;
-      }
-      if (value <= threshold && (!best || value < best.distance)) best = { id: object.id, type: object.type, distance: value };
-    }
-    return best;
+  // Resolves the open prompt from the dialog's returnValue. Called by the (asynchronous)
+  // close event, and synchronously by ask() if a new prompt arrives before that event.
+  function settleAsk() {
+    const current = pendingAsk;
+    pendingAsk = null;
+    if (!current) return;
+    $('dialogOk').textContent = 'Rendben';
+    if ($('dialog').returnValue !== 'ok') return current.resolve(null);
+    const result = {};
+    current.fields.forEach(definition => { result[definition.key] = $('dialogFields').querySelector(`[name="${definition.key}"]`).value; });
+    current.resolve(result);
   }
-
-  async function addArchitectureAt(worldPoint) {
-    const geometry = activeGeometry();
-    if (!geometry || geometry.vertices.length < 2 || !openingTool) {
-      flash('Válassz aktív geometriát és egy elhelyezendő építészeti elemet.');
-      return;
-    }
-    if ((openingTool === 'door' || openingTool === 'radiator') && !geometry.closed) {
-      flash('Ajtónyitási irányhoz és radiátorhoz előbb zárd be a szobapoligont.');
-      return;
-    }
-    const nearest = Geometry.nearestWall(pointToCm(worldPoint), geometry.vertices, geometry.closed);
-    const threshold = 24 / (view.z * scale());
-    if (!nearest || nearest.distance > threshold) {
-      flash('Kattints közelebb a kiválasztott falhoz.');
-      return;
-    }
-    const definitions = {
-      door: {
-        title: 'Ajtó elhelyezése', fields: [
-          { key: 'name', label: 'Megnevezés', value: 'Ajtó' },
-          { key: 'width', label: 'Ajtó szélessége (cm)', value: '90', type: 'number' },
-          { key: 'hinge', label: 'Zsanér helye', value: 'start', options: [['start', 'Bal / falszakasz eleje'], ['end', 'Jobb / falszakasz vége']] },
-          { key: 'swing', label: 'Nyitási irány', value: 'in', options: [['in', 'A szoba belseje felé'], ['out', 'A szobából kifelé']] }
-        ]
-      },
-      window: {
-        title: 'Ablak elhelyezése', fields: [
-          { key: 'name', label: 'Megnevezés', value: 'Ablak' },
-          { key: 'width', label: 'Ablak szélessége (cm)', value: '120', type: 'number' },
-          { key: 'height', label: 'Ablak magassága (cm)', value: '120', type: 'number' }
-        ]
-      },
-      radiator: {
-        title: 'Radiátor elhelyezése', fields: [
-          { key: 'name', label: 'Megnevezés', value: 'Radiátor' },
-          { key: 'width', label: 'Szélesség (cm)', value: '80', type: 'number' },
-          { key: 'depth', label: 'Mélység (cm)', value: '12', type: 'number' },
-          { key: 'height', label: 'Magasság (cm)', value: '60', type: 'number' }
-        ]
-      }
-    };
-    const definition = definitions[openingTool];
-    const answer = await ask(definition.title, `${nearest.wallIndex + 1}. fal · minden méret valós centiméterben`, definition.fields);
-    if (!answer) return;
-    const width = Number(answer.width);
-    if (!Number.isFinite(width) || width <= 0 || width > nearest.length) {
-      flash('Az elem szélességének pozitívnak és a falnál rövidebbnek kell lennie.');
-      return;
-    }
-    const object = {
-      id: idFactory(), type: openingTool, name: answer.name.trim() || definition.title,
-      wallIndex: nearest.wallIndex, offset: clamp(nearest.offset, width / 2, nearest.length - width / 2), width
-    };
-    if (openingTool === 'door') Object.assign(object, { hinge: answer.hinge, swing: answer.swing });
-    if (openingTool === 'window') object.height = Number(answer.height);
-    if (openingTool === 'radiator') Object.assign(object, { depth: Number(answer.depth), height: Number(answer.height) });
-    if ([object.height, object.depth].filter(value => value !== undefined).some(value => !Number.isFinite(value) || value <= 0)) {
-      flash('Minden megadott méretnek pozitív számnak kell lennie.');
-      return;
-    }
-    geometry.objects.push(object);
-    selectedArchitecture = { id: object.id, type: object.type };
-    openingTool = null;
-    document.querySelectorAll('#openingTools button').forEach(button => button.classList.remove('selected'));
-    save(); renderProps(); draw();
-  }
-
-  function openRoom(id, recordChange = true) {
-    if (!data.rooms[id]) id = 'room1';
-    roomId = id;
-    data.currentRoom = id;
-    $('canvasRoomName').textContent = room().name;
-    selected = null;
-    selectedVertex = null;
-    selectedArchitecture = null;
-    snapGuides = [];
-    lineStart = lineEnd = null;
-    image = new Image();
-    image.onload = () => {
-      fit();
-      renderRooms();
-      renderVariants();
-      renderGeometryControls();
-      renderProps();
-      save(recordChange);
-      flash(`Megnyitva: ${room().name} · Ellenőrizd a méretarányt!`, 6500);
-    };
-    image.onerror = () => flash('Nem sikerült betölteni az alaprajzot.');
-    image.src = plan().url;
-    renderRooms();
-  }
-
-  function ask(title, hint, fields) {
+  function ask(title, hint, fields, okLabel = 'Rendben') {
+    const dialog = $('dialog');
+    // A second request while one is already open (e.g. a double-triggered action)
+    // is ignored instead of throwing InvalidStateError or hijacking the first answer.
+    if (dialog.open) return Promise.resolve(null);
+    if (pendingAsk) settleAsk();
     return new Promise(resolve => {
-      const dialog = $('dialog');
       const container = $('dialogFields');
       $('dialogTitle').textContent = title;
-      $('dialogHint').textContent = hint;
+      $('dialogHint').textContent = hint || '';
+      $('dialogHint').hidden = !hint;
+      $('dialogError').hidden = true;
+      $('dialogOk').textContent = okLabel;
       container.innerHTML = '';
       for (const definition of fields) {
         const box = document.createElement('div');
@@ -1384,591 +1567,1909 @@
         label.textContent = definition.label;
         const input = definition.options ? document.createElement('select') : document.createElement('input');
         input.name = definition.key;
+        input.id = `dialog-field-${definition.key}`;
+        label.htmlFor = input.id;
+        input.dataset.label = definition.label.replace(/\s*\(.*\)\s*$/, '');
         if (definition.options) {
-          for (const [value, text] of definition.options) {
-            const option = document.createElement('option');
-            option.value = value;
-            option.textContent = text;
-            input.append(option);
-          }
+          for (const [value, text] of definition.options) { const option = document.createElement('option'); option.value = value; option.textContent = text; input.append(option); }
         } else input.type = definition.type || 'text';
         input.value = definition.value ?? '';
-        input.required = definition.required !== false;
-        if (input.type === 'number') {
-          input.min = definition.min ?? '0.01';
-          input.max = definition.max ?? '5000';
-          input.step = 'any';
+        if (definition.required !== false && !definition.options) {
+          input.required = true;
+          if (input.type === 'text') input.dataset.trim = '1';
         }
+        if (input.type === 'number') { input.min = definition.min ?? '0.1'; input.max = definition.max ?? '5000'; input.step = 'any'; }
         box.append(label, input);
         container.append(box);
       }
+      pendingAsk = { resolve, fields };
+      dialog.returnValue = '';
       dialog.showModal();
-      const close = () => {
-        if (dialog.returnValue !== 'ok') return resolve(null);
-        const result = {};
-        fields.forEach(definition => { result[definition.key] = container.querySelector(`[name="${definition.key}"]`).value; });
-        resolve(result);
-      };
-      dialog.addEventListener('close', close, { once: true });
+      setTimeout(() => { const first = container.querySelector('input,select'); (first || $('dialogOk')).focus(); }, 30);
     });
   }
 
+  async function confirmAction(title, hint, okLabel = 'Rendben') {
+    return (await ask(title, hint, [], okLabel)) !== null;
+  }
+
+  // ------------------------------------------------------------------ inspector
+  function numberField(label, value, onChange, options = {}) {
+    const box = document.createElement('div');
+    box.className = 'field';
+    box.innerHTML = `<label>${escapeHtml(label)}</label><div class="num"><input type="number" step="${options.step || 1}" ${options.min !== undefined ? `min="${options.min}"` : ''} ${options.max !== undefined ? `max="${options.max}"` : ''}><span class="unit">${options.unit ?? 'cm'}</span></div>`;
+    const input = box.querySelector('input');
+    input.value = Number.isFinite(Number(value)) ? Math.round(Number(value) * 10) / 10 : '';
+    if (options.disabled) input.disabled = true;
+    if (options.key) input.dataset.key = options.key;
+    input.addEventListener('change', () => {
+      const next = Number(input.value);
+      if (!Number.isFinite(next) || (options.positive !== false && next <= 0)) { input.value = value; return; }
+      onChange(next);
+    });
+    return box;
+  }
+
+  function section(title, extra = '') {
+    const node = document.createElement('section');
+    node.className = 'inspector-section';
+    if (title) node.innerHTML = `<h3><span>${escapeHtml(title)}</span>${extra}</h3>`;
+    return node;
+  }
+
+  function sourceBadge(item) {
+    if (item.source === 'ikea') return '<span class="badge ikea">IKEA · ellenőrzött méret</span>';
+    if (item.dimensionStatus === 'user') return '<span class="badge user">Saját méret</span>';
+    if (item.aiSuggested) return '<span class="badge ai">AI által javasolt méret</span>';
+    return '<span class="badge typical">Tipikus méret</span>';
+  }
+
+  function renderInspectorSoon() { inspectorQueued = true; requestRender(); }
+
+  function renderInspector() {
+    const node = $('inspector');
+    node.innerHTML = '';
+    if (ui.mode !== 'furnish') { renderArchitectureInspector(node); return; }
+    const item = selectedItem();
+    if (!item) { renderRoomOverview(node); return; }
+    const model = Catalog.modelFor(item);
+
+    const header = section('');
+    header.innerHTML = `<div class="item-header"><div class="thumb"><img alt=""></div><div><input class="name-input" aria-label="Megnevezés"><div class="sub">${sourceBadge(item)}${item.productId ? `<span>${escapeHtml(item.productId)}</span>` : ''}</div></div></div>`;
+    header.querySelector('img').src = Art.thumbnail({ key: `sel-${model}`, model, width: item.w, depth: item.h, height: item.height, materials: item.materials }, 112);
+    const nameInput = header.querySelector('.name-input');
+    nameInput.value = item.name;
+    nameInput.onchange = () => { const value = nameInput.value.trim(); if (value) { item.name = value; commit('Átnevezés'); requestRender(); } else nameInput.value = item.name; };
+    if (item.source === 'ikea' && item.productUrl) {
+      const links = document.createElement('div');
+      links.className = 'button-row';
+      links.innerHTML = `<a class="product-link" href="${escapeHtml(item.productUrl)}" target="_blank" rel="noopener noreferrer">Termékoldal ${icon('external')}</a>`;
+      const fav = document.createElement('button');
+      fav.className = 'button small ghost';
+      fav.innerHTML = `${icon('heart')}${isFavorite(item.productId) ? 'Kedvenc' : 'Kedvencekhez'}`;
+      fav.onclick = () => toggleFavorite(productFromItem(item));
+      links.append(fav);
+      header.append(links);
+    }
+    node.append(header);
+
+    // Dimensions
+    const dims = section('Méretek', item.source === 'ikea' ? '<span class="badge verified">ellenőrzött</span>' : item.dimensionStatus === 'user' ? '<span class="badge user">saját</span>' : item.aiSuggested ? '<span class="badge ai">AI-javaslat</span>' : '<span class="badge typical">tipikus</span>');
+    const grid = document.createElement('div');
+    grid.className = 'grid-3';
+    const lockedDims = item.source === 'ikea' && !item.unlockDims;
+    grid.append(
+      numberField('Szélesség', item.w, value => { Object.assign(item, Geometry.resizeAboutCenter(item, value, item.h)); markUserDims(item); commit('Méret'); renderInspector(); requestRender(); }, { disabled: lockedDims || item.locked, key: 'w', step: 0.5 }),
+      numberField('Mélység', item.h, value => { Object.assign(item, Geometry.resizeAboutCenter(item, item.w, value)); markUserDims(item); commit('Méret'); renderInspector(); requestRender(); }, { disabled: lockedDims || item.locked, key: 'h', step: 0.5 }),
+      numberField('Magasság', item.height || Catalog.defaultHeight(model), value => { item.height = value; markUserDims(item); commit('Méret'); requestRender(); }, { disabled: (lockedDims && item.height) || item.locked, step: 0.5 })
+    );
+    dims.append(grid);
+    if (!item.height) {
+      const note = document.createElement('p');
+      note.className = 'note warning';
+      note.textContent = `Magasság nincs megadva – a 3D nézet tipikus ${fmt(Catalog.defaultHeight(model))} cm-rel ábrázolja. Írd be a valós értéket.`;
+      dims.append(note);
+    }
+    if (item.source === 'ikea') {
+      const original = item.originalDimensions;
+      const changed = original && (item.w !== original.width || item.h !== original.depth);
+      const note = document.createElement('p');
+      note.className = `note${changed ? ' warning' : ''}`;
+      note.textContent = changed
+        ? `A terven átméretezve. Eredeti termékméret: ${fmt(original.width)} × ${fmt(original.depth)}${original.height ? ` × ${fmt(original.height)}` : ''} cm.`
+        : `Termékoldal szerinti külső méret (${Ikea?.verifiedAt || ''}). A 3D modell illusztráció, nem a termék pontos formája.`;
+      dims.append(note);
+      const unlock = document.createElement('label');
+      unlock.className = 'check';
+      unlock.innerHTML = `<input type="checkbox"${item.unlockDims ? ' checked' : ''}> Méret kézi módosításának engedélyezése`;
+      unlock.querySelector('input').onchange = event => { item.unlockDims = event.target.checked; commit('Méretzár'); renderInspector(); };
+      dims.append(unlock);
+    } else if (item.dimensionStatus === 'typical') {
+      const note = document.createElement('p');
+      note.className = 'note';
+      note.textContent = 'Tipikus tervezési méret, nem termékadat. Írd át a megvásárolni kívánt bútor méretére; a sarokpontokkal is átméretezhető.';
+      dims.append(note);
+    }
+    node.append(dims);
+
+    // Placement
+    const place = section('Elhelyezés', item.locked ? '<span class="badge typical">rögzítve</span>' : '');
+    const interior = interiorBounds();
+    const center = Geometry.itemCenter(item);
+    const pos = document.createElement('div');
+    pos.className = 'grid-2';
+    pos.append(
+      numberField('Közép X', center.x - interior.minX, value => { Object.assign(item, Geometry.cornerForCenter(item, { x: value + interior.minX, y: Geometry.itemCenter(item).y })); commit('Pozíció'); requestRender(); }, { disabled: item.locked, key: 'cx', positive: false }),
+      numberField('Közép Y', center.y - interior.minY, value => { Object.assign(item, Geometry.cornerForCenter(item, { x: Geometry.itemCenter(item).x, y: value + interior.minY })); commit('Pozíció'); requestRender(); }, { disabled: item.locked, key: 'cy', positive: false })
+    );
+    place.append(pos);
+    const rotation = document.createElement('div');
+    rotation.className = 'rotation-row';
+    const rotationField = numberField('Forgatás', item.rot || 0, value => rotateSelected(value, true), { unit: '°', positive: false, disabled: item.locked, key: 'rot' });
+    const quick = document.createElement('div');
+    quick.className = 'quick-angles';
+    for (const angle of [0, 90, 180, 270]) {
+      const button = document.createElement('button');
+      button.textContent = `${angle}°`;
+      button.className = Math.round(item.rot || 0) === angle ? 'selected' : '';
+      button.disabled = item.locked;
+      button.onclick = () => rotateSelected(angle, true);
+      quick.append(button);
+    }
+    rotation.append(rotationField, quick);
+    place.append(rotation);
+    const placementActions = document.createElement('div');
+    placementActions.className = 'action-grid';
+    const action = (iconName, label, handler, cls = '') => {
+      const button = document.createElement('button');
+      button.className = `button small ${cls}`;
+      button.innerHTML = `${icon(iconName)}${label}`;
+      button.onclick = handler;
+      button.disabled = item.locked && !['Feloldás', 'Rögzítés'].includes(label);
+      placementActions.append(button);
+      return button;
+    };
+    action('align', 'Falhoz tolás', () => pushSelectedToWall());
+    action('rotate', 'Falhoz forgatás', () => alignSelectedToWall());
+    action('rotate-left', '−90°', () => rotateSelected(-90));
+    action('rotate', '+90°', () => rotateSelected(90));
+    place.append(placementActions);
+    const geom = geometry();
+    if (geom) {
+      const clearances = Geometry.wallClearances(item, Geometry.wallSegments(geom));
+      const labels = { top: 'Hátul', right: 'Jobbra', bottom: 'Elöl', left: 'Balra' };
+      const grid4 = document.createElement('div');
+      grid4.className = 'clearance-grid';
+      grid4.dataset.role = 'clearances';
+      grid4.innerHTML = clearances.map(value => `<div><small>${labels[value.side]}</small><strong>${Number.isFinite(value.distance) ? fmt(value.distance, 0) : '–'}</strong></div>`).join('');
+      const caption = document.createElement('p');
+      caption.className = 'note';
+      caption.textContent = 'Szabad távolság a legközelebbi falig, cm (a bútor saját oldalaitól mérve).';
+      place.append(grid4, caption);
+    }
+    node.append(place);
+
+    // Materials
+    const materialsSection = section('Anyagok és színek');
+    renderSlotEditor(materialsSection, item);
+    node.append(materialsSection);
+
+    // Actions
+    const actions = section('Műveletek');
+    const actionGrid = document.createElement('div');
+    actionGrid.className = 'action-grid';
+    const add = (iconName, label, handler, cls = '') => {
+      const button = document.createElement('button');
+      button.className = `button small ${cls}`;
+      button.innerHTML = `${icon(iconName)}${label}`;
+      button.onclick = handler;
+      actionGrid.append(button);
+    };
+    add('copy', 'Másolat', duplicateSelected);
+    add(item.locked ? 'lock-open' : 'lock', item.locked ? 'Feloldás' : 'Rögzítés', () => { item.locked = !item.locked; commit('Rögzítés'); renderInspector(); requestRender(); });
+    add('layers', 'Előre', () => { variant().items = [...items().filter(v => v.id !== item.id), item]; commit('Sorrend'); requestRender(); });
+    add('trash', 'Törlés', deleteSelected, 'danger');
+    actions.append(actionGrid);
+    const shortcuts = document.createElement('p');
+    shortcuts.className = 'note';
+    shortcuts.textContent = 'Nyilak: 1 cm · Shift + nyilak: 10 cm · R: forgatás 90° · Ctrl+D: másolat · Del: törlés · Alt húzás közben: illesztés nélkül';
+    actions.append(shortcuts);
+    node.append(actions);
+  }
+
+  function markUserDims(item) {
+    if (item.source !== 'ikea') { item.dimensionStatus = 'user'; delete item.aiSuggested; }
+  }
+
+  function updateInspectorPosition() {
+    const item = selectedItem();
+    if (!item) return;
+    const interior = interiorBounds();
+    const center = Geometry.itemCenter(item);
+    const set = (key, value) => { const input = $('inspector').querySelector(`input[data-key="${key}"]`); if (input && document.activeElement !== input) input.value = Math.round(value * 10) / 10; };
+    set('cx', center.x - interior.minX); set('cy', center.y - interior.minY); set('rot', item.rot || 0); set('w', item.w); set('h', item.h);
+    const grid = $('inspector').querySelector('[data-role="clearances"]');
+    const geom = geometry();
+    if (grid && geom) {
+      const values = Geometry.wallClearances(item, Geometry.wallSegments(geom));
+      grid.querySelectorAll('strong').forEach((strong, index) => { strong.textContent = Number.isFinite(values[index].distance) ? fmt(values[index].distance, 0) : '–'; });
+    }
+  }
+
+  function pushSelectedToWall() {
+    const item = selectedItem();
+    const geom = geometry();
+    if (!item || !geom) return;
+    const result = Geometry.pushToWall(item, Geometry.wallSegments(geom), 0);
+    if (!result) { toast('A bútor mögött nincs fal.'); return; }
+    item.x = result.x; item.y = result.y;
+    commit('Falhoz tolás');
+    renderInspector(); requestRender();
+    toast('A bútor háta a falhoz illesztve.');
+  }
+
+  function alignSelectedToWall() {
+    const item = selectedItem();
+    const geom = geometry();
+    if (!item || !geom) return;
+    const center = Geometry.itemCenter(item);
+    const wall = Geometry.nearestWall(center, geom.vertices, geom.closed);
+    if (!wall) return;
+    // Rotate so the item's back (local top edge) faces the nearest wall.
+    const frame = Geometry.wallFrame(geom.vertices, wall.wallIndex, wall.offset);
+    const inward = frame.inward; // points into the room
+    // Local "front" direction for rot=θ is (−sinθ, cosθ); we need front == inward.
+    const angle = Math.atan2(-inward.x, inward.y) * 180 / Math.PI;
+    Object.assign(item, Geometry.rotateAboutCenter(item, Math.round(angle * 10) / 10));
+    const pushed = Geometry.pushToWall(item, Geometry.wallSegments(geom), 0);
+    if (pushed) { item.x = pushed.x; item.y = pushed.y; }
+    commit('Falhoz forgatás');
+    renderInspector(); requestRender();
+  }
+
+  function renderSlotEditor(container, item, compact = false) {
+    const model = Catalog.modelFor(item);
+    const slots = Catalog.slotsFor(item);
+    const current = { ...Catalog.defaultMaterials(model), ...(item.materials || {}) };
+    for (const [slot, label] of Object.entries(slots)) {
+      const wrapper = document.createElement('div');
+      wrapper.className = 'slot';
+      const mat = Materials.get(current[slot] || current.primary);
+      wrapper.innerHTML = `<div class="slot-head"><strong>${escapeHtml(label)}</strong><span>${escapeHtml(mat.name)}</span></div>`;
+      const swatches = document.createElement('div');
+      swatches.className = 'swatches';
+      const groups = Catalog.slotGroups(model, slot);
+      for (const material of Materials.inGroup(...groups).slice(0, compact ? 18 : 30)) {
+        const swatch = makeSwatch(material, current[slot] === material.id, () => {
+          item.materials = { ...(item.materials || {}), [slot]: material.id };
+          commit('Anyag');
+          renderInspector(); renderMaterialsSelection(); requestRender();
+        });
+        swatches.append(swatch);
+      }
+      wrapper.append(swatches);
+      container.append(wrapper);
+    }
+    const same = items().filter(value => value.id !== item.id && Catalog.modelFor(value) === model);
+    if (same.length) {
+      const button = document.createElement('button');
+      button.className = 'button small ghost wide';
+      button.innerHTML = `${icon('copy')}Alkalmazás mind a(z) ${same.length + 1} hasonló bútorra`;
+      button.onclick = () => { same.forEach(value => { value.materials = { ...(item.materials || {}) }; }); commit('Anyag mindre'); toast('Anyagok átmásolva'); requestRender(); };
+      container.append(button);
+    }
+  }
+
+  const swatchCache = new Map();
+  function swatchImage(material) {
+    if (swatchCache.has(material.id)) return swatchCache.get(material.id);
+    let url = '';
+    if (material.pattern && material.pattern !== 'plain' && material.tile) {
+      const source = Art.textureSource(material, 128);
+      // Show roughly 60 cm of floors, 20 cm of fabrics
+      const canvasNode = document.createElement('canvas');
+      canvasNode.width = canvasNode.height = 96;
+      const ctx = canvasNode.getContext('2d', { willReadFrequently: true });
+      const show = material.group === 'floor' ? 90 : material.group === 'fabric' || material.group === 'rug' ? 14 : 40;
+      const scale = 96 / show;
+      const pattern = ctx.createPattern(source, 'repeat');
+      pattern.setTransform(new DOMMatrix().scale(material.tile / 128 * scale));
+      ctx.fillStyle = pattern;
+      ctx.fillRect(0, 0, 96, 96);
+      url = canvasNode.toDataURL();
+    }
+    swatchCache.set(material.id, url);
+    return url;
+  }
+
+  function makeSwatch(material, selected, onClick) {
+    const button = document.createElement('button');
+    button.className = `swatch${selected ? ' selected' : ''}`;
+    button.title = material.name;
+    button.setAttribute('aria-label', material.name);
+    const image = swatchImage(material);
+    button.style.background = image ? `url(${image}) center / cover` : `linear-gradient(145deg, ${Materials.shade(material.color, 0.12)}, ${Materials.shade(material.color, -0.08)})`;
+    if (material.metalness) button.style.background = `linear-gradient(135deg, ${Materials.shade(material.color, 0.35)}, ${material.color} 45%, ${Materials.shade(material.color, -0.25)})`;
+    button.onclick = onClick;
+    return button;
+  }
+
+  function renderRoomOverview(node) {
+    const geom = geometry();
+    const head = section('');
+    head.innerHTML = `<div class="empty-inspector"><div class="hero">${icon('plan')}</div><strong>${escapeHtml(room().name)}</strong><p class="note">${escapeHtml(room().active)} · ${items().length} bútor</p></div>`;
+    node.append(head);
+    const stats = section('Helyiség');
+    if (geom?.closed) {
+      const area = Geometry.polygonArea(geom.vertices) / 10000;
+      const confirmed = geom.confirmedWalls.filter(Boolean).length;
+      stats.innerHTML += `<div class="stats">
+        <div class="stat"><small>Alapterület</small><strong>${fmt(area, 2)}<em>m²</em></strong></div>
+        <div class="stat"><small>Kerület</small><strong>${fmt(Geometry.polygonPerimeter(geom.vertices) / 100, 2)}<em>m</em></strong></div>
+        <div class="stat"><small>Falak</small><strong>${geom.vertices.length}</strong></div>
+        <div class="stat"><small>Megerősített</small><strong>${confirmed}<em>/ ${geom.vertices.length}</em></strong></div></div>`;
+      if (confirmed < geom.vertices.length) {
+        const warning = document.createElement('p');
+        warning.className = 'note warning';
+        warning.textContent = `${geom.vertices.length - confirmed} fal hossza becsült (≈). Az alapterület ezért tájékoztató. Részletek: Helyiség fül.`;
+        stats.append(warning);
+      }
+    } else {
+      stats.innerHTML += '<p class="note">Ehhez a helyiséghez még nincs zárt falgeometria. A Helyiség fülön rajzolhatsz egyet.</p>';
+    }
+    node.append(stats);
+    const surfaces = section('Felületek');
+    const floorRow = document.createElement('div');
+    floorRow.className = 'slot';
+    floorRow.innerHTML = `<div class="slot-head"><strong>Padló</strong><span>${escapeHtml(Materials.get(roomMaterials().floor).name)}</span></div>`;
+    const floorSw = document.createElement('div'); floorSw.className = 'swatches';
+    for (const material of Materials.inGroup('floor')) floorSw.append(makeSwatch(material, roomMaterials().floor === material.id, () => setRoomMaterial('floor', material.id)));
+    floorRow.append(floorSw);
+    const wallRow = document.createElement('div');
+    wallRow.className = 'slot';
+    wallRow.innerHTML = `<div class="slot-head"><strong>Fal</strong><span>${escapeHtml(Materials.get(roomMaterials().walls).name)}</span></div>`;
+    const wallSw = document.createElement('div'); wallSw.className = 'swatches';
+    for (const material of Materials.inGroup('wall')) wallSw.append(makeSwatch(material, roomMaterials().walls === material.id, () => setRoomMaterial('walls', material.id)));
+    wallRow.append(wallSw);
+    surfaces.append(floorRow, wallRow);
+    node.append(surfaces);
+    const tips = section('Első lépések');
+    tips.innerHTML += '<p class="note">Húzz bútort a bal oldali katalógusból a terv fölé, vagy kattints rá. A bútor kijelölésekor itt állíthatod a pontos méretet, pozíciót, forgatást és az anyagokat. A 2D és a 3D nézet ugyanazt a tervet mutatja.</p>';
+    node.append(tips);
+  }
+
+  function setRoomMaterial(kind, id) {
+    roomMaterials()[kind] = id;
+    commit(kind === 'floor' ? 'Padló' : 'Falszín');
+    renderInspector();
+    renderMaterialsPanel();
+    requestRender();
+  }
+
+  function renderArchitectureInspector(node) {
+    const geom = geometry();
+    if (ui.mode === 'calibrate') {
+      node.append(Object.assign(section('Háttérkép igazítása'), {}));
+      node.lastChild.innerHTML += '<p class="note">Az eredeti rajz csak tájékoztató háttér. Kalibrálása nem módosítja a falakat és a bútorokat.</p>';
+      return;
+    }
+    if (!geom) {
+      const s = section('Új geometria');
+      s.innerHTML += '<p class="note">Kattints a terven a falpontokra sorban. Az első pontra kattintva zárod a poligont.</p>';
+      node.append(s);
+      return;
+    }
+    const object = geom.objects.find(value => value.id === ui.selectedObjectId);
+    if (ui.mode === 'openings' && object) { renderObjectInspector(node, geom, object); return; }
+    if (ui.selectedVertex !== null && geom.vertices[ui.selectedVertex]) {
+      const vertex = geom.vertices[ui.selectedVertex];
+      const s = section(`${ui.selectedVertex + 1}. falpont`);
+      const grid = document.createElement('div'); grid.className = 'grid-2';
+      const b = Geometry.polygonBounds(geom.vertices);
+      grid.append(
+        numberField('X', vertex.x - b.minX, value => { vertex.x = value + b.minX; invalidateAdjacent(geom, ui.selectedVertex); commit('Falpont'); renderInspector(); requestRender(); }, { positive: false }),
+        numberField('Y', vertex.y - b.minY, value => { vertex.y = value + b.minY; invalidateAdjacent(geom, ui.selectedVertex); commit('Falpont'); renderInspector(); requestRender(); }, { positive: false })
+      );
+      s.append(grid);
+      const del = document.createElement('button');
+      del.className = 'button small danger';
+      del.innerHTML = `${icon('trash')}Falpont törlése`;
+      del.onclick = () => deleteVertex(ui.selectedVertex);
+      s.append(del);
+      node.append(s);
+      return;
+    }
+    if (ui.selectedWall !== null && geom.vertices.length >= 2) {
+      node.append(wallEditor(geom, ui.selectedWall));
+      return;
+    }
+    const s = section('Szerkezet');
+    s.innerHTML += `<p class="note">${ui.mode === 'openings' ? 'Válassz eszközt a felső sávban (ajtó, ablak, radiátor, nyílás), majd kattints egy falra. Meglévő elemet kijelölhetsz és a fal mentén húzhatsz.' : 'Kattints egy falra a hossz pontosításához, vagy húzz egy falpontot. Dupla kattintás a falon: új töréspont.'}</p>`;
+    node.append(s);
+    const thicknessSection = section('Megjelenítés');
+    const grid = document.createElement('div'); grid.className = 'grid-2';
+    grid.append(
+      numberField('Falvastagság', thickness(), value => { room().wallThickness = clamp(value, 4, 60); commit('Falvastagság'); requestRender(); }, { step: 1 }),
+      numberField('Belmagasság', room().wallHeight, value => { room().wallHeight = clamp(value, 180, 600); commit('Belmagasság'); requestRender(); }, { step: 1 })
+    );
+    thicknessSection.append(grid);
+    thicknessSection.innerHTML += '<p class="note">A falvastagság és a belmagasság becsült, csak a megjelenítést befolyásolja: a belső méretek nem változnak.</p>';
+    node.append(thicknessSection);
+  }
+
+  function invalidateAdjacent(geom, index) {
+    const n = geom.vertices.length;
+    geom.confirmedWalls[(index - 1 + n) % n] = false;
+    geom.confirmedWalls[index] = false;
+  }
+
+  function wallEditor(geom, index) {
+    const s = section(`${index + 1}. fal`);
+    const a = geom.vertices[index]; const b = geom.vertices[(index + 1) % geom.vertices.length];
+    const length = Geometry.distance(a, b);
+    const label = geom.wallLabels?.[index];
+    const confirmed = Boolean(geom.confirmedWalls?.[index]);
+    s.append(numberField('Hossz', length, value => setWallLength(index, value, true), { step: 0.5 }));
+    const status = document.createElement('p');
+    status.className = `note${confirmed ? '' : ' warning'}`;
+    status.textContent = confirmed ? 'Megerősített, pontos méret.' : 'Becsült hossz (≈). Írd be a helyszínen mért értéket, vagy erősítsd meg.';
+    s.append(status);
+    if (label) {
+      const info = document.createElement('p');
+      info.className = 'note';
+      info.innerHTML = `${geom.source === 'plan' ? 'A tervrajzon szereplő méret' : 'A rajzon szereplő méret'}: <strong>${fmt(label)} cm</strong>${geom.wallNotes?.[index] ? ` · ${escapeHtml(geom.wallNotes[index])}` : ''}`;
+      s.append(info);
+      const apply = document.createElement('button');
+      apply.className = 'button small';
+      apply.innerHTML = `${icon('check')}${geom.source === 'plan' ? 'Terv' : 'Rajz'} szerinti ${fmt(label)} cm alkalmazása`;
+      apply.hidden = Math.abs(label - length) < 0.5;
+      apply.onclick = () => setWallLength(index, label, true);
+      s.append(apply);
+    } else if (geom.wallNotes?.[index]) {
+      const info = document.createElement('p'); info.className = 'note'; info.textContent = geom.wallNotes[index]; s.append(info);
+    }
+    const measured = geom.wallMeasured?.[index];
+    if (measured && Math.abs(measured - length) > 0.5) {
+      const apply = document.createElement('button');
+      apply.className = 'button small ghost';
+      apply.innerHTML = `${icon('measure')}Kézi mérés szerinti ${fmt(measured)} cm alkalmazása`;
+      apply.onclick = () => setWallLength(index, measured, true);
+      s.append(apply);
+    }
+    const row = document.createElement('div');
+    row.className = 'button-row';
+    const toggle = document.createElement('button');
+    toggle.className = 'button small ghost';
+    toggle.innerHTML = `${icon(confirmed ? 'close' : 'check')}${confirmed ? 'Megerősítés visszavonása' : 'Jelenlegi hossz megerősítése'}`;
+    toggle.onclick = () => { geom.confirmedWalls[index] = !confirmed; commit('Megerősítés'); renderInspector(); renderRoomPanel(); requestRender(); };
+    const split = document.createElement('button');
+    split.className = 'button small ghost';
+    split.innerHTML = `${icon('plus')}Fal felosztása`;
+    split.onclick = () => splitWall(index);
+    row.append(toggle, split);
+    s.append(row);
+    return s;
+  }
+
+  function renderObjectInspector(node, geom, object) {
+    const names = { door: 'Ajtó', window: 'Ablak', radiator: 'Radiátor', opening: 'Nyílás' };
+    const s = section(names[object.type], object.estimated ? '<span class="badge estimated">becsült</span>' : '');
+    const frame = Geometry.wallFrame(geom.vertices, object.wallIndex, 0);
+    const wallLength = frame?.length || 0;
+    const apply = (key, value) => {
+      object[key] = value;
+      object.estimated = false;
+      if (key === 'width') { object.fullWall = false; object.width = Math.min(value, wallLength); }
+      if (!object.fullWall) object.offset = clamp(object.offset, object.width / 2, Math.max(object.width / 2, wallLength - object.width / 2));
+      commit('Nyílászáró'); renderInspector(); requestRender();
+    };
+    const grid = document.createElement('div'); grid.className = 'grid-2';
+    grid.append(
+      numberField('Szélesség', object.fullWall ? wallLength : object.width, value => apply('width', value), { step: 0.5 }),
+      numberField('Közép a fal elejétől', object.fullWall ? wallLength / 2 : object.offset, value => apply('offset', value), { step: 0.5, disabled: object.fullWall })
+    );
+    s.append(grid);
+    if (object.type === 'door') {
+      const sel = (label, key, options) => {
+        const box = document.createElement('div'); box.className = 'field';
+        box.innerHTML = `<label>${label}</label><select>${options.map(([v, t]) => `<option value="${v}"${object[key] === v ? ' selected' : ''}>${t}</option>`).join('')}</select>`;
+        box.querySelector('select').onchange = event => apply(key, event.target.value);
+        return box;
+      };
+      const g2 = document.createElement('div'); g2.className = 'grid-2';
+      g2.append(sel('Zsanér', 'hinge', [['start', 'Fal eleje'], ['end', 'Fal vége']]), sel('Nyílásirány', 'swing', [['in', 'Befelé'], ['out', 'Kifelé']]));
+      s.append(g2);
+    }
+    if (object.type === 'window') {
+      const g2 = document.createElement('div'); g2.className = 'grid-2';
+      g2.append(numberField('Parapet', object.sill ?? 85, value => apply('sill', value), { step: 1 }), numberField('Ablakmagasság', object.height ?? 140, value => apply('height', value), { step: 1 }));
+      s.append(g2);
+    }
+    if (object.type === 'radiator') {
+      const g2 = document.createElement('div'); g2.className = 'grid-2';
+      g2.append(numberField('Mélység', object.depth ?? 10, value => apply('depth', value)), numberField('Magasság', object.height ?? 60, value => apply('height', value)));
+      s.append(g2);
+    }
+    if (object.estimated) {
+      const note = document.createElement('p'); note.className = 'note warning';
+      note.textContent = 'A rajzról becsült elem. Mérd le a helyszínen és írd be a pontos értékeket.';
+      s.append(note);
+    }
+    const del = document.createElement('button');
+    del.className = 'button small danger';
+    del.innerHTML = `${icon('trash')}${names[object.type]} törlése`;
+    del.onclick = () => { geom.objects = geom.objects.filter(value => value.id !== object.id); ui.selectedObjectId = null; commit('Nyílászáró törlése'); renderInspector(); requestRender(); };
+    s.append(del);
+    node.append(s);
+  }
+
+  // ------------------------------------------------------------------ catalogue
+  function productByKey(key) {
+    return Catalog.all.find(value => value.key === key) || favorites.map(favoriteProduct).find(value => value.key === key);
+  }
+
+  function favoriteProduct(fav) {
+    const known = Catalog.ikea.find(value => value.productId === fav.productId);
+    if (known) return known;
+    return { ...fav, key: `fav-${fav.productId}`, model: fav.model || Catalog.ikeaModel(fav), source: 'ikea', category: ({ sofas: 'sofas', wardrobes: 'wardrobes', beds: 'beds', tables: 'tables', chairs: 'chairs', storage: 'storage' })[fav.category] || 'storage', materials: {}, dimensionStatus: 'verified', layer: 'main' };
+  }
+
+  function isFavorite(productId) { return favorites.some(value => value.productId === productId); }
+
+  function productFromItem(item) {
+    return { name: item.name, productId: item.productId, category: item.category || 'storage', type: item.type, width: item.originalDimensions?.width || item.w, depth: item.originalDimensions?.depth || item.h, height: item.originalDimensions?.height, productUrl: item.productUrl, model: item.model };
+  }
+
+  function toggleFavorite(product) {
+    try {
+      const normalized = Core.normalizeProduct(product);
+      favorites = isFavorite(normalized.productId) ? favorites.filter(value => value.productId !== normalized.productId) : [...favorites, normalized];
+      favorites = Core.saveFavorites(localStorage, favorites);
+      renderCatalog();
+      if (selectedItem()) renderInspector();
+      toast(isFavorite(normalized.productId) ? 'Hozzáadva a kedvencekhez' : 'Eltávolítva a kedvencekből');
+    } catch (error) { toast(error.message || 'A kedvencek mentése nem sikerült.'); }
+  }
+
+  function renderCategoryChips() {
+    const container = $('categoryChips');
+    container.innerHTML = '';
+    const entries = [['all', 'Mind'], ...Object.entries(Catalog.categories)];
+    for (const [key, label] of entries) {
+      const chip = document.createElement('button');
+      chip.className = `chip${ui.catalogCategory === key ? ' selected' : ''}`;
+      chip.textContent = label;
+      chip.dataset.category = key;
+      chip.onclick = () => { ui.catalogCategory = key; renderCategoryChips(); renderCatalog(); };
+      container.append(chip);
+    }
+  }
+
+  function renderCatalog() {
+    const query = $('catalogSearch').value.toLocaleLowerCase('hu').trim();
+    let source = ui.catalogSource === 'ikea' ? Catalog.ikea : ui.catalogSource === 'generic' ? Catalog.generic : ui.catalogSource === 'favorites' ? favorites.map(favoriteProduct) : Catalog.all;
+    source = source.filter(product => {
+      const haystack = `${product.name} ${product.productId || ''} ${Catalog.categories[product.category] || ''}`.toLocaleLowerCase('hu');
+      return haystack.includes(query) && (ui.catalogCategory === 'all' || product.category === ui.catalogCategory);
+    });
+    const container = $('catalog');
+    container.innerHTML = '';
+    for (const product of source) {
+      const card = document.createElement('button');
+      card.className = 'catalog-card';
+      card.draggable = true;
+      card.dataset.key = product.key;
+      card.title = `${product.name}\n${fmt(product.width)} × ${fmt(product.depth)} × ${fmt(product.height || 0)} cm${product.source === 'ikea' ? '\nEllenőrzött termékméret' : '\nTipikus tervezési méret'}`;
+      card.innerHTML = `<div class="thumb"><img alt="" loading="lazy"></div><div class="meta"><strong></strong><small></small></div>${product.source === 'ikea' ? '<span class="badge ikea">IKEA</span>' : ''}`;
+      card.querySelector('img').src = Art.thumbnail(product, 120);
+      card.querySelector('strong').textContent = product.name;
+      card.querySelector('small').textContent = `${fmt(product.width)} × ${fmt(product.depth)} cm${product.productId ? ` · ${product.productId}` : ''}`;
+      card.onclick = () => addProduct(product);
+      card.addEventListener('dragstart', event => {
+        event.dataTransfer.setData('text/zuglak-product', product.key);
+        event.dataTransfer.effectAllowed = 'copy';
+        if (ui.view !== '2d') setView('2d');
+      });
+      card.addEventListener('dragend', () => { $('dropHint').hidden = true; });
+      if (product.source === 'ikea') {
+        const fav = document.createElement('span');
+        fav.className = `favorite-button${isFavorite(product.productId) ? ' active' : ''}`;
+        fav.setAttribute('role', 'button');
+        fav.title = isFavorite(product.productId) ? 'Eltávolítás a kedvencekből' : 'Mentés a kedvencekhez';
+        fav.innerHTML = icon('heart');
+        fav.onclick = event => { event.stopPropagation(); toggleFavorite(product); };
+        card.append(fav);
+      }
+      container.append(card);
+    }
+    $('catalogCount').textContent = `${source.length} elem`;
+    $('favoriteCount').textContent = favorites.length;
+    $('catalogEmpty').hidden = source.length > 0;
+    document.querySelectorAll('#sourceFilter button').forEach(button => button.classList.toggle('selected', button.dataset.source === ui.catalogSource));
+    $('catalogNote').textContent = `IKEA: termékoldal szerinti külső méretek (ellenőrizve ${Catalog.ikeaVerifiedAt}). Általános: tipikus tervezési méretek, nem termékadat.`;
+  }
+
+  // ------------------------------------------------------------------ materials panel
+  function renderMaterialsPanel() {
+    const fill = (containerId, list, current, onPick) => {
+      const container = $(containerId);
+      container.innerHTML = '';
+      for (const material of list) {
+        const swatch = makeSwatch(material, current === material.id, () => onPick(material.id));
+        container.append(swatch);
+      }
+    };
+    fill('floorSwatches', Materials.inGroup('floor'), roomMaterials().floor, id => setRoomMaterial('floor', id));
+    fill('wallSwatches', Materials.inGroup('wall'), roomMaterials().walls, id => setRoomMaterial('walls', id));
+    const kitchen = items().filter(item => Catalog.categories[item.category] && item.category === 'kitchen' || /^kitchen|island/.test(Catalog.modelFor(item)));
+    const kitchenFront = kitchen[0]?.materials?.primary;
+    const worktop = kitchen.find(item => Catalog.modelFor(item) !== 'kitchen-tall' && Catalog.modelFor(item) !== 'fridge')?.materials?.secondary;
+    const applyKitchen = (slot, id) => {
+      const targets = kitchen.filter(item => slot === 'primary' ? Catalog.modelFor(item) !== 'fridge' : !['kitchen-tall', 'fridge'].includes(Catalog.modelFor(item)));
+      if (!targets.length) { toast('Ebben a változatban még nincs konyhai elem.'); return; }
+      targets.forEach(item => { item.materials = { ...(item.materials || {}), [slot]: id }; });
+      commit('Konyha anyag'); renderMaterialsPanel(); renderInspector(); requestRender();
+      toast(`${targets.length} konyhai elem frissítve`);
+    };
+    fill('kitchenFrontSwatches', Materials.inGroup('wood'), kitchenFront, id => applyKitchen('primary', id));
+    fill('worktopSwatches', [...Materials.inGroup('stone'), Materials.get('wood-oak-natural'), Materials.get('wood-walnut')], worktop, id => applyKitchen('secondary', id));
+    renderMaterialsSelection();
+  }
+
+  function renderMaterialsSelection() {
+    const container = $('materialsSelection');
+    if (!container) return;
+    container.innerHTML = '';
+    const item = selectedItem();
+    $('materialsSelectionHint').hidden = Boolean(item);
+    if (item) {
+      const title = document.createElement('p');
+      title.className = 'fineprint';
+      title.innerHTML = `<strong>${escapeHtml(item.name)}</strong>`;
+      container.append(title);
+      renderSlotEditor(container, item, true);
+    }
+  }
+
+  // ------------------------------------------------------------------ variants panel
+  const thumbCache = new Map();
+  function invalidateThumbs() { thumbCache.clear(); }
+
+  function renderMiniPlan(canvasNode, roomId, variantName, options = {}) {
+    const roomData = data.rooms[roomId];
+    const variantData = roomData.variants[variantName];
+    const geom = (roomData.geometries || []).find(value => value.id === roomData.activeGeometryId) || null;
+    const width = options.width || canvasNode.clientWidth || 160;
+    const height = options.height || canvasNode.clientHeight || 120;
+    const dpr = Math.min(2, window.devicePixelRatio || 1);
+    canvasNode.width = width * dpr; canvasNode.height = height * dpr;
+    const ctx = canvasNode.getContext('2d', options.cpu ? { willReadFrequently: true } : undefined);
+    const outer = geom?.closed ? Geometry.offsetPolygonOutward(geom.vertices, Number(roomData.wallThickness) || 12) : geom?.vertices;
+    const b = outer?.length ? Geometry.polygonBounds(outer) : { minX: 0, minY: 0, maxX: 400, maxY: 400 };
+    const pad = options.pad ?? 8;
+    const z = Math.min((width - pad * 2) / (b.maxX - b.minX), (height - pad * 2) / (b.maxY - b.minY));
+    const T = { z, x: width / 2 - (b.minX + b.maxX) / 2 * z, y: height / 2 - (b.minY + b.maxY) / 2 * z, dpr, width, height };
+    drawPlan(ctx, T, { room: roomData, variant: variantData, geometry: geom, roomId, dims: false, labels: false, grid: false, underlay: false, background: options.background || '#ffffff', interactive: false, darkWalls: false });
+  }
+
+  function renderVariantsPanel() {
+    const list = $('variantList');
+    list.innerHTML = '';
+    const names = Object.keys(room().variants);
+    for (const name of names) {
+      const v = room().variants[name];
+      const card = document.createElement('div');
+      card.className = `variant-card${name === room().active ? ' active' : ''}`;
+      card.innerHTML = `<canvas></canvas><button class="info" style="all:unset;cursor:pointer;display:grid;min-width:0"><strong></strong><small></small></button><div class="actions"></div>`;
+      card.querySelector('strong').textContent = name;
+      card.querySelector('small').textContent = `${v.items.length} bútor · ${Materials.get(v.materials?.floor).name}`;
+      card.querySelector('.info').onclick = () => switchVariant(name);
+      card.querySelector('canvas').onclick = () => switchVariant(name);
+      const actions = card.querySelector('.actions');
+      const button = (iconName, title, handler) => {
+        const b = document.createElement('button');
+        b.className = 'icon-button'; b.title = title; b.innerHTML = icon(iconName); b.onclick = handler; actions.append(b);
+      };
+      button('edit', 'Átnevezés', () => renameVariantPrompt(name));
+      button('copy', 'Másolat', () => duplicateVariant(name));
+      if (names.length > 1) button('trash', 'Törlés', () => deleteVariantPrompt(name));
+      list.append(card);
+      requestAnimationFrame(() => renderMiniPlan(card.querySelector('canvas'), ui.roomId, name, { width: 76, height: 58, pad: 4 }));
+    }
+    $('versionTarget').textContent = `· ${room().active}`;
+    const versions = [...(variant().versions || [])].reverse();
+    const versionList = $('versionList');
+    versionList.innerHTML = versions.length ? '' : '<p class="fineprint">Még nincs mentett pillanatkép. A pillanatkép a változat aktuális bútorozását és anyagait rögzíti.</p>';
+    for (const version of versions) {
+      const row = document.createElement('div');
+      row.className = 'version-row';
+      row.innerHTML = `<div><strong></strong><small>${dateLabel(version.savedAt)} · ${version.items.length} bútor</small></div>`;
+      row.querySelector('strong').textContent = version.label;
+      const restoreButton = document.createElement('button');
+      restoreButton.className = 'button small'; restoreButton.textContent = 'Visszaállítás';
+      restoreButton.onclick = async () => {
+        if (!await confirmAction('Verzió visszaállítása', `A(z) „${room().active}” változat jelenlegi állapotát a(z) „${version.label}” pillanatkép váltja fel. Visszavonással (Ctrl+Z) bármikor visszaléphetsz.`, 'Visszaállítás')) return;
+        Core.restoreVersion(room(), room().active, version.id);
+        ui.selectedId = null;
+        commit('Verzió visszaállítása');
+        refreshAll();
+        toast('Pillanatkép visszaállítva');
+      };
+      const del = document.createElement('button');
+      del.className = 'icon-button'; del.title = 'Törlés'; del.innerHTML = icon('trash');
+      del.onclick = () => { variant().versions = variant().versions.filter(value => value.id !== version.id); commit('Verzió törlése'); renderVariantsPanel(); };
+      row.append(restoreButton, del);
+      versionList.append(row);
+    }
+  }
+
+  function switchVariant(name) {
+    if (!room().variants[name]) return;
+    room().active = name;
+    ui.selectedId = null;
+    commit('Változatváltás');
+    refreshAll();
+    toast(`Aktív változat: ${name}`);
+  }
+
+  async function renameVariantPrompt(name) {
+    const answer = await ask('Változat átnevezése', '', [{ key: 'name', label: 'Név', value: name }]);
+    if (!answer) return;
+    try { Core.renameVariant(room(), name, answer.name); commit('Változat átnevezése'); refreshAll(); } catch (error) { toast(error.message); }
+  }
+
+  function duplicateVariant(name = room().active) {
+    const created = Core.createVariant(room(), `${name} – másolat`, { from: name, idFactory });
+    ui.selectedId = null;
+    commit('Változat másolása');
+    refreshAll();
+    toast(`Új változat: ${created}`);
+  }
+
+  async function newVariant() {
+    const answer = await ask('Új, üres változat', 'Ugyanaz a helyiség, bútorok nélkül. A padló és a falszín az aktív változatból öröklődik.', [{ key: 'name', label: 'Név', value: `Elrendezés ${String.fromCharCode(65 + Object.keys(room().variants).length)}` }]);
+    if (!answer?.name?.trim()) return;
+    Core.createVariant(room(), answer.name, { now: Date.now() });
+    ui.selectedId = null;
+    commit('Új változat');
+    refreshAll();
+  }
+
+  async function deleteVariantPrompt(name) {
+    if (!await confirmAction('Változat törlése', `Biztosan törlöd a(z) „${name}” változatot? Visszavonással (Ctrl+Z) visszahozható.`, 'Törlés')) return;
+    try { Core.deleteVariant(room(), name); ui.selectedId = null; commit('Változat törlése'); refreshAll(); } catch (error) { toast(error.message); }
+  }
+
+  async function saveVersionPrompt() {
+    const answer = await ask('Pillanatkép mentése', `A(z) „${room().active}” változat jelenlegi állapota.`, [{ key: 'label', label: 'Megnevezés', value: `${room().active} – ${new Date().toLocaleDateString('hu-HU')}` }]);
+    if (!answer) return;
+    Core.saveVersion(room(), room().active, answer.label, Date.now(), idFactory);
+    commit('Pillanatkép');
+    renderVariantsPanel();
+    toast('Pillanatkép elmentve');
+  }
+
+  function openCompare() {
+    const names = Object.keys(room().variants);
+    const selects = [$('compareA'), $('compareB')];
+    selects.forEach((select, index) => {
+      select.className = 'plain';
+      select.innerHTML = names.map(name => `<option>${escapeHtml(name)}</option>`).join('');
+      select.value = names[index === 0 ? names.indexOf(room().active) : (names.indexOf(room().active) + 1) % names.length] || names[0];
+      select.onchange = drawCompare;
+    });
+    $('compareDialog').showModal();
+    requestAnimationFrame(drawCompare);
+  }
+
+  function drawCompare() {
+    const a = $('compareA').value; const b = $('compareB').value;
+    renderMiniPlan($('compareCanvasA'), ui.roomId, a, { width: $('compareCanvasA').clientWidth, height: $('compareCanvasA').clientHeight, pad: 16 });
+    renderMiniPlan($('compareCanvasB'), ui.roomId, b, { width: $('compareCanvasB').clientWidth, height: $('compareCanvasB').clientHeight, pad: 16 });
+    const diff = Core.compareVariants(room().variants[a], room().variants[b]);
+    const list = (only, node) => {
+      const common = diff.common.map(name => `<li>${escapeHtml(name)}</li>`).join('');
+      node.innerHTML = only.map(name => `<li class="only">${escapeHtml(name)} – csak itt</li>`).join('') + common;
+    };
+    list(diff.onlyA, $('compareListA'));
+    list(diff.onlyB, $('compareListB'));
+  }
+
+  // ------------------------------------------------------------------ room panel
+  function renderRoomPanel() {
+    const container = $('roomPanel');
+    container.innerHTML = '';
+    const plan = planFor(ui.roomId);
+    const geom = geometry();
+    const nameRow = document.createElement('div');
+    nameRow.className = 'field';
+    nameRow.innerHTML = '<label>Helyiség neve</label><input>';
+    const nameInput = nameRow.querySelector('input');
+    nameInput.value = room().name;
+    nameInput.onchange = () => { if (nameInput.value.trim()) { room().name = nameInput.value.trim(); commit('Átnevezés'); renderTopbar(); renderRoomMenu(); } };
+    container.append(nameRow);
+
+    if (geometries().length > 1) {
+      const selectBox = document.createElement('div');
+      selectBox.className = 'field';
+      selectBox.innerHTML = `<label>Aktív falgeometria</label><select>${geometries().map(g => `<option value="${g.id}"${g.id === room().activeGeometryId ? ' selected' : ''}>${escapeHtml(g.name)}${g.closed ? '' : ' (nyitott)'}</option>`).join('')}</select>`;
+      selectBox.querySelector('select').onchange = event => { room().activeGeometryId = event.target.value; commit('Geometria váltás'); fitView(); refreshAll(); };
+      container.append(selectBox);
+    }
+
+    const editRow = document.createElement('div');
+    editRow.className = 'button-row';
+    if (ui.mode === 'furnish') {
+      const edit = document.createElement('button');
+      edit.className = 'button wide';
+      edit.id = 'editArchitecture';
+      edit.innerHTML = `${icon('lock-open')}Szerkezet szerkesztése`;
+      edit.onclick = async () => {
+        if (!await confirmAction('Szerkezet szerkesztése', 'A falak, ajtók és ablakok alapesetben védettek a véletlen módosítás ellen. Szerkesztés közben minden változás visszavonható.', 'Szerkesztés')) return;
+        startArchitecture('walls');
+      };
+      editRow.append(edit);
+    } else {
+      const done = document.createElement('button');
+      done.className = 'button primary wide';
+      done.innerHTML = `${icon('lock')}Szerkesztés befejezése`;
+      done.onclick = finishArchitecture;
+      editRow.append(done);
+    }
+    container.append(editRow);
+
+    if ((geom?.source === 'traced' || geom?.source === 'plan') && plan.review?.length) {
+      const review = document.createElement('div');
+      review.className = 'review-box';
+      review.innerHTML = geom.source === 'plan'
+        ? `<strong>Építészeti tervrajz alapján</strong><span>A tervrajzon feliratozott falak megerősítettek; a többi a tervről lett lemérve (≈). A „mért” érték a kézi felmérésed.</span><ul>${plan.review.map(text => `<li>${escapeHtml(text)}</li>`).join('')}</ul>`
+        : `<strong>A rajz méretei ellentmondásosak</strong><span>Az alaprajz a rajzról lett átvéve, egységes léptékkel. Minden fal becsült (≈), amíg nem erősíted meg.</span><ul>${plan.review.map(text => `<li>${escapeHtml(text)}</li>`).join('')}</ul>`;
+      container.append(review);
+    }
+
+    if (geom && geom.vertices.length >= 2) {
+      const count = geom.closed ? geom.vertices.length : geom.vertices.length - 1;
+      const confirmed = geom.confirmedWalls.filter(Boolean).length;
+      const h = document.createElement('h3');
+      h.innerHTML = `Falak <small>${confirmed} / ${count} megerősítve</small>`;
+      container.append(h);
+      const table = document.createElement('div');
+      table.className = 'wall-table';
+      for (let index = 0; index < count; index += 1) {
+        const a = geom.vertices[index]; const b = geom.vertices[(index + 1) % geom.vertices.length];
+        const length = Geometry.distance(a, b);
+        const isConfirmed = Boolean(geom.confirmedWalls[index]);
+        const label = geom.wallLabels?.[index];
+        const open = (geom.objects || []).some(object => object.wallIndex === index && object.fullWall);
+        const row = document.createElement('div');
+        row.className = `wall-row${ui.selectedWall === index ? ' highlight' : ''}`;
+        row.innerHTML = `<span class="idx">${index + 1}</span><span class="desc"><strong>${isConfirmed ? '' : '≈ '}${fmt(length)} cm</strong><span class="${isConfirmed ? 'confirmed' : 'estimated'}">${isConfirmed ? 'megerősítve' : 'becsült'}${label ? ` · ${geom.source === 'plan' ? 'terv' : 'rajz'}: ${fmt(label)}` : ''}${geom.wallMeasured?.[index] ? ` · mért: ${fmt(geom.wallMeasured[index])}` : ''}${open ? ' · nyílás' : ''}</span></span>`;
+        if (ui.mode !== 'furnish') {
+          const input = document.createElement('input');
+          input.type = 'number'; input.step = '0.5'; input.value = Math.round(length * 10) / 10;
+          input.className = 'plain';
+          input.onchange = () => setWallLength(index, Number(input.value), true);
+          row.append(input);
+          if (label && Math.abs(label - length) > 0.5) {
+            const apply = document.createElement('button');
+            apply.className = 'button small ghost apply';
+            apply.textContent = `Rajz szerinti ${fmt(label)} cm`;
+            apply.onclick = () => setWallLength(index, label, true);
+            row.append(apply);
+          }
+        }
+        row.onclick = event => {
+          if (event.target.tagName === 'INPUT' || event.target.tagName === 'BUTTON') return;
+          ui.selectedWall = index; ui.selectedVertex = null;
+          if (ui.mode === 'furnish') toast('A falhossz módosításához kattints a „Szerkezet szerkesztése” gombra.');
+          renderRoomPanel(); renderInspector(); requestRender();
+        };
+        table.append(row);
+      }
+      container.append(table);
+    }
+
+    const display = document.createElement('h3');
+    display.textContent = 'Megjelenítés (becsült értékek)';
+    container.append(display);
+    const grid = document.createElement('div');
+    grid.className = 'grid-2';
+    grid.append(
+      numberField('Falvastagság', thickness(), value => { room().wallThickness = clamp(value, 4, 60); commit('Falvastagság'); requestRender(); }),
+      numberField('Belmagasság', room().wallHeight || Core.DEFAULT_WALL_HEIGHT, value => { room().wallHeight = clamp(value, 180, 600); commit('Belmagasság'); requestRender(); })
+    );
+    container.append(grid);
+    const note = document.createElement('p');
+    note.className = 'fineprint';
+    note.textContent = 'A falvastagság kifelé rajzolódik, így a belső, bútorozható méretek nem változnak. A belmagasság csak a 3D nézetet befolyásolja.';
+    container.append(note);
+
+    const underlay = document.createElement('h3');
+    underlay.textContent = 'Eredeti rajz';
+    container.append(underlay);
+    const underRow = document.createElement('div');
+    underRow.className = 'button-row';
+    const toggle = document.createElement('button');
+    toggle.className = 'button small';
+    toggle.innerHTML = `${icon('eye')}${layer('showUnderlay') ? 'Rajz elrejtése' : 'Rajz megjelenítése'}`;
+    toggle.onclick = () => { $('showUnderlay').checked = !layer('showUnderlay'); savePrefs(); renderRoomPanel(); requestRender(); };
+    const calibrate = document.createElement('button');
+    calibrate.className = 'button small ghost';
+    calibrate.innerHTML = `${icon('measure')}Rajz igazítása`;
+    calibrate.onclick = () => { $('showUnderlay').checked = true; startArchitecture('calibrate'); };
+    underRow.append(toggle, calibrate);
+    container.append(underRow);
+    const note2 = document.createElement('p');
+    note2.className = 'fineprint';
+    note2.textContent = `Jelenlegi skála: 1 cm = ${fmt(room().pxPerCm || 0, 3)} px. A rajz nem egységesen méretarányos, ezért csak tájékoztató háttér.`;
+    container.append(note2);
+
+    if (ui.mode === 'furnish' || ui.mode === 'walls') {
+      const drawNew = document.createElement('button');
+      drawNew.className = 'button small ghost';
+      drawNew.innerHTML = `${icon('plus')}Új geometria rajzolása`;
+      drawNew.onclick = async () => {
+        if (!await confirmAction('Új geometria', 'Egy új, saját falgeometriát rajzolhatsz. A meglévő geometria megmarad és később visszaválasztható.', 'Rajzolás')) return;
+        const g = { id: idFactory(), name: `Saját geometria ${geometries().length + 1}`, source: 'user', vertices: [], closed: false, confirmedWalls: [], objects: [], partitions: [], wallLabels: [], wallNotes: [] };
+        geometries().push(g); room().activeGeometryId = g.id;
+        commit('Új geometria');
+        startArchitecture('draw');
+      };
+      container.append(drawNew);
+    }
+  }
+
+  // ------------------------------------------------------------------ topbar & menus
+  const roomThumbs = new Map();
+  function roomThumb(id) {
+    const key = `${id}|${data.rooms[id].activeGeometryId}`;
+    if (roomThumbs.has(key)) return roomThumbs.get(key);
+    const c = document.createElement('canvas');
+    renderMiniPlan(c, id, data.rooms[id].active, { width: 80, height: 80, pad: 6, background: '#f6f2eb', cpu: true });
+    const url = c.toDataURL();
+    roomThumbs.set(key, url);
+    return url;
+  }
+
+  function renderTopbar() {
+    $('roomName').textContent = room().name;
+    $('variantName').textContent = room().active;
+    $('roomThumb').src = roomThumb(ui.roomId);
+    $('presentationRoom').textContent = room().name;
+    $('presentationVariant').textContent = `${room().active} · ${new Date().toLocaleDateString('hu-HU')}`;
+  }
+
+  function renderRoomMenu() {
+    const menu = $('roomMenu');
+    menu.innerHTML = '';
+    for (const plan of allPlans()) {
+      const roomData = data.rooms[plan.id];
+      if (!roomData) continue;
+      const geom = (roomData.geometries || []).find(value => value.id === roomData.activeGeometryId);
+      const area = geom?.closed ? `${fmt(Geometry.polygonArea(geom.vertices) / 10000, 1)} m²` : 'geometria nélkül';
+      const button = document.createElement('button');
+      button.className = `menu-item${plan.id === ui.roomId ? ' active' : ''}`;
+      button.innerHTML = `<img alt=""><span><strong></strong><small>${Object.keys(roomData.variants).length} változat · ${area}${plan.isCustom ? ' · saját feltöltés' : ''}</small></span>`;
+      button.querySelector('img').src = roomThumb(plan.id);
+      button.querySelector('strong').textContent = roomData.name;
+      button.onclick = () => { closeMenus(); openRoom(plan.id); };
+      menu.append(button);
+    }
+  }
+
+  function renderVariantMenu() {
+    const menu = $('variantMenu');
+    menu.innerHTML = '';
+    for (const name of Object.keys(room().variants)) {
+      const v = room().variants[name];
+      const button = document.createElement('button');
+      button.className = `menu-item${name === room().active ? ' active' : ''}`;
+      button.innerHTML = `<span><strong></strong><small>${v.items.length} bútor · ${escapeHtml(Materials.get(v.materials?.floor).name)}</small></span>`;
+      button.querySelector('strong').textContent = name;
+      button.onclick = () => { closeMenus(); switchVariant(name); };
+      menu.append(button);
+    }
+    menu.insertAdjacentHTML('beforeend', '<div class="menu-sep"></div>');
+    const dup = document.createElement('button');
+    dup.className = 'menu-item';
+    dup.innerHTML = `${icon('copy')}<span><strong>Változat másolása</strong><small>Az aktuális elrendezésből</small></span>`;
+    dup.onclick = () => { closeMenus(); duplicateVariant(); };
+    const manage = document.createElement('button');
+    manage.className = 'menu-item';
+    manage.innerHTML = `${icon('layers')}<span><strong>Változatok kezelése…</strong><small>Átnevezés, verziók, összevetés</small></span>`;
+    manage.onclick = () => { closeMenus(); setLeftTab('variants'); };
+    menu.append(dup, manage);
+  }
+
+  function closeMenus() {
+    document.querySelectorAll('.menu').forEach(menu => { menu.hidden = true; });
+    document.querySelectorAll('[aria-expanded="true"]').forEach(button => button.setAttribute('aria-expanded', 'false'));
+  }
+
+  function bindDropdown(buttonId, menuId, onOpen) {
+    const button = $(buttonId); const menu = $(menuId);
+    button.addEventListener('click', event => {
+      event.stopPropagation();
+      const open = menu.hidden;
+      closeMenus();
+      if (open) { onOpen?.(); menu.hidden = false; button.setAttribute('aria-expanded', 'true'); }
+    });
+    menu.addEventListener('click', event => event.stopPropagation());
+  }
+
+  function openRoom(id) {
+    if (!data.rooms[id]) return;
+    if (ui.mode !== 'furnish') finishArchitecture();
+    ui.roomId = id;
+    ui.selectedId = null; ui.measure = null;
+    data.currentRoom = id;
+    commit('Helyiségváltás');
+    fitView();
+    refreshAll();
+    if (view3d) view3d.resetCamera();
+  }
+
+  function setLeftTab(tab) {
+    ui.leftTab = tab;
+    document.querySelectorAll('.rail button').forEach(button => button.classList.toggle('selected', button.dataset.tab === tab));
+    document.querySelectorAll('.tab-panel').forEach(panel => { panel.hidden = panel.dataset.panel !== tab; });
+    document.body.classList.toggle('panel-open', window.matchMedia('(max-width: 860px)').matches);
+    if (tab === 'variants') renderVariantsPanel();
+    if (tab === 'materials') renderMaterialsPanel();
+    if (tab === 'room') renderRoomPanel();
+    if (tab === 'ai') { renderAiPanel(); setTimeout(() => { if (aiKey) $('aiInput').focus(); }, 30); }
+    savePrefs();
+  }
+
+  function setView(view) {
+    ui.view = view === '3d' ? '3d' : '2d';
+    document.querySelectorAll('#viewSwitch button').forEach(button => button.classList.toggle('selected', button.dataset.view === ui.view));
+    $('view2d').hidden = ui.view !== '2d';
+    $('view3d').hidden = ui.view !== '3d';
+    $('toolbar2d').hidden = ui.view !== '2d';
+    $('toolbar3d').hidden = ui.view !== '3d';
+    $('statusbar').hidden = ui.view !== '2d';
+    if (ui.view === '3d') {
+      if (ui.mode !== 'furnish') finishArchitecture();
+      ensure3D();
+      view3d?.setVisible(true);
+    } else {
+      view3d?.setVisible(false);
+      if (needsFit) requestAnimationFrame(fitView);
+    }
+    savePrefs();
+    requestRender();
+  }
+
+  function refreshAll() {
+    document.body.classList.toggle('has-selection', Boolean(ui.selectedId));
+    renderTopbar();
+    renderRoomMenu();
+    renderVariantMenu();
+    renderInspector();
+    renderCatalog();
+    if (ui.leftTab === 'variants') renderVariantsPanel();
+    if (ui.leftTab === 'materials') renderMaterialsPanel();
+    if (ui.leftTab === 'room') renderRoomPanel();
+    if (ui.leftTab === 'ai') renderAiPanel();
+    renderModeBanner();
+    $('scaleInfo').textContent = 'Méretek centiméterben · ≈ becsült fal';
+    requestRender();
+  }
+
+  // ------------------------------------------------------------------ presentation
+  function setPresentation(on) {
+    ui.presentation = Boolean(on);
+    document.body.classList.toggle('presenting', ui.presentation);
+    $('presentationCaption').hidden = !ui.presentation;
+    $('exitPresentation').hidden = !ui.presentation;
+    if (ui.presentation) { ui.selectedId = null; closeMenus(); renderTopbar(); }
+    renderModeBanner();
+    setTimeout(() => { if (ui.view === '2d') fitView(); else view3d?.resetCamera(); requestRender(); }, 60);
+  }
+
+  // ------------------------------------------------------------------ exports
+  function download(name, blob) {
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    anchor.href = url; anchor.download = name;
+    document.body.append(anchor); anchor.click(); anchor.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 2000);
+  }
+
+  const safeName = text => String(text).normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^\w-]+/g, '_').replace(/_+/g, '_').replace(/^_|_$/g, '');
+
+  /** Renders the 2D presentation sheet (plan + title block + furniture list) to a canvas. */
+  function renderSheet(options) {
+    const paper = options.paper || 'a3';
+    const aspect = paper === 'square' ? 1 : Math.SQRT2;
+    const width = Math.round(options.width || 2400);
+    const height = Math.round(width / aspect);
+    const sheet = document.createElement('canvas');
+    sheet.width = width; sheet.height = height;
+    const ctx = sheet.getContext('2d');
+    const unit = width / 1000; // layout unit
+    const background = options.background === 'transparent' ? null : options.background || '#ffffff';
+    const darkBg = background === '#2c2b29';
+    const ink = darkBg ? '#f3efe8' : '#23211e';
+    const muted = darkBg ? '#b9b1a5' : '#8a8378';
+    if (background) { ctx.fillStyle = background; ctx.fillRect(0, 0, width, height); }
+    const margin = 40 * unit;
+    const sideW = options.labels || options.title ? 250 * unit : 0;
+    const planArea = { x: margin, y: margin, w: width - margin * 2 - sideW - (sideW ? margin * 0.6 : 0), h: height - margin * 2 };
+    const geom = geometry();
+    const outer = geom?.closed ? Geometry.offsetPolygonOutward(geom.vertices, thickness()) : geom?.vertices;
+    const b = outer?.length ? Geometry.polygonBounds(outer) : roomBounds();
+    const dimSpace = options.dims ? 46 : 10; // cm-ish reserve for dimension lines
+    const z = Math.min(planArea.w / (b.maxX - b.minX + dimSpace * 2), planArea.h / (b.maxY - b.minY + dimSpace * 2));
+    const T = { z, x: planArea.x + planArea.w / 2 - (b.minX + b.maxX) / 2 * z, y: planArea.y + planArea.h / 2 - (b.minY + b.maxY) / 2 * z, dpr: 1, width, height };
+    const numbered = [...items()].filter(item => Catalog.layerFor(item) !== 'top' || options.labels);
+    const numbers = new Map(numbered.map((item, index) => [item.id, index + 1]));
+    ctx.save();
+    // drawPlan paints its own background; limit it to nothing by passing null and then restoring our bg
+    const off = document.createElement('canvas');
+    off.width = width; off.height = height;
+    const offCtx = off.getContext('2d');
+    // Line widths in drawPlan are in screen px; scale them for print density.
+    const print = { ...T, z: T.z, dpr: 1 };
+    const pxScale = Math.max(1, unit * 0.9);
+    // Render the plan at a virtual zoom so hairlines are pxScale wide.
+    print.z = T.z / pxScale; print.x = T.x / pxScale; print.y = T.y / pxScale; print.dpr = pxScale;
+    print.width = width / pxScale; print.height = height / pxScale;
+    drawPlan(offCtx, print, { dims: options.dims, labels: options.labels, numbers: options.labels ? numbers : null, grid: false, underlay: false, background: null, interactive: false, drawingLabels: false, darkWalls: false });
+    ctx.drawImage(off, 0, 0);
+    ctx.restore();
+
+    // Scale bar (1 m)
+    if (options.title) {
+      const barY = height - margin * 0.9;
+      const barX = planArea.x;
+      const meter = 100 * T.z;
+      ctx.fillStyle = ink;
+      for (let index = 0; index < 4; index += 1) {
+        ctx.fillStyle = index % 2 ? (background || '#fff') : ink;
+        ctx.fillRect(barX + index * meter / 2, barY, meter / 2, 5 * unit);
+      }
+      ctx.strokeStyle = ink; ctx.lineWidth = unit * 0.8; ctx.strokeRect(barX, barY, meter * 2, 5 * unit);
+      ctx.fillStyle = muted; ctx.font = `500 ${9 * unit}px Inter, sans-serif`; ctx.textBaseline = 'top';
+      ctx.fillText('0', barX, barY + 8 * unit); ctx.fillText('1 m', barX + meter - 6 * unit, barY + 8 * unit); ctx.fillText('2 m', barX + meter * 2 - 8 * unit, barY + 8 * unit);
+    }
+
+    // Side column
+    if (sideW) {
+      const x = width - margin - sideW;
+      let y = margin;
+      ctx.textBaseline = 'top';
+      if (options.title) {
+        ctx.fillStyle = muted; ctx.font = `650 ${9 * unit}px Inter, sans-serif`;
+        ctx.fillText('ZUGLAK STUDIO · BERENDEZÉSI TERV', x, y); y += 18 * unit;
+        ctx.fillStyle = ink; ctx.font = `700 ${22 * unit}px Inter, sans-serif`;
+        y = wrapText(ctx, room().name, x, y, sideW, 26 * unit); y += 4 * unit;
+        ctx.font = `500 ${13 * unit}px Inter, sans-serif`; ctx.fillStyle = darkBg ? '#e0d8cc' : '#57524a';
+        ctx.fillText(room().active, x, y); y += 20 * unit;
+        ctx.fillStyle = muted; ctx.font = `500 ${9.5 * unit}px Inter, sans-serif`;
+        ctx.fillText(new Date().toLocaleDateString('hu-HU', { year: 'numeric', month: 'long', day: 'numeric' }), x, y); y += 22 * unit;
+        const area = geom?.closed ? `${fmt(Geometry.polygonArea(geom.vertices) / 10000, 2)} m²` : '–';
+        const facts = [['Alapterület', area], ['Padló', Materials.get(roomMaterials().floor).name], ['Fal', Materials.get(roomMaterials().walls).name]];
+        for (const [label, value] of facts) {
+          ctx.fillStyle = muted; ctx.font = `600 ${8.5 * unit}px Inter, sans-serif`; ctx.fillText(label.toUpperCase(), x, y);
+          ctx.fillStyle = ink; ctx.font = `560 ${11 * unit}px Inter, sans-serif`; ctx.fillText(value, x + 78 * unit, y - 1 * unit);
+          y += 17 * unit;
+        }
+        y += 10 * unit;
+        ctx.strokeStyle = darkBg ? '#4a4741' : '#e4ded5'; ctx.lineWidth = unit; ctx.beginPath(); ctx.moveTo(x, y); ctx.lineTo(x + sideW, y); ctx.stroke();
+        y += 14 * unit;
+      }
+      if (options.labels && numbered.length) {
+        ctx.fillStyle = muted; ctx.font = `650 ${8.5 * unit}px Inter, sans-serif`; ctx.fillText('BÚTORLISTA', x, y); y += 16 * unit;
+        const rowH = Math.min(17 * unit, (height - margin - y - 40 * unit) / numbered.length);
+        const fontSize = Math.max(6.5, Math.min(10, rowH / unit * 0.62));
+        for (const item of numbered) {
+          const n = numbers.get(item.id);
+          ctx.fillStyle = darkBg ? '#f3efe8' : '#23211e';
+          ctx.beginPath(); ctx.arc(x + 7 * unit, y + rowH / 2 - 1 * unit, 7 * unit * Math.min(1, rowH / (17 * unit)), 0, Math.PI * 2); ctx.fill();
+          ctx.fillStyle = darkBg ? '#23211e' : '#fff'; ctx.font = `700 ${fontSize * 0.85 * unit}px Inter, sans-serif`; ctx.textAlign = 'center';
+          ctx.fillText(String(n), x + 7 * unit, y + rowH / 2 - fontSize * 0.5 * unit); ctx.textAlign = 'left';
+          ctx.fillStyle = ink; ctx.font = `560 ${fontSize * unit}px Inter, sans-serif`;
+          const name = item.name.length > 30 ? `${item.name.slice(0, 29)}…` : item.name;
+          ctx.fillText(name, x + 20 * unit, y + rowH / 2 - fontSize * 0.55 * unit);
+          ctx.fillStyle = muted; ctx.textAlign = 'right';
+          ctx.fillText(`${fmt(item.w, 0)}×${fmt(item.h, 0)}${item.source === 'ikea' ? ' · IKEA' : ''}`, x + sideW, y + rowH / 2 - fontSize * 0.55 * unit);
+          ctx.textAlign = 'left';
+          y += rowH;
+        }
+        y += 10 * unit;
+      }
+      if (options.title) {
+        ctx.fillStyle = muted; ctx.font = `500 ${8 * unit}px Inter, sans-serif`;
+        const geomNote = geom && geom.confirmedWalls.some(value => !value) ? '≈ jelölt falhossz: a rajzról becsült, nem megerősített érték. ' : '';
+        wrapText(ctx, `${geomNote}Méretek centiméterben. A bútorok IKEA esetén termékoldal szerinti, egyébként tipikus méretűek. Vásárlás és kivitelezés előtt mérd le a helyszínen.`, x, height - margin - 46 * unit, sideW, 11 * unit);
+      }
+    }
+    return sheet;
+  }
+
+  function wrapText(ctx, text, x, y, maxWidth, lineHeight) {
+    const words = String(text).split(/\s+/);
+    let line = '';
+    for (const word of words) {
+      const test = line ? `${line} ${word}` : word;
+      if (ctx.measureText(test).width > maxWidth && line) { ctx.fillText(line, x, y); line = word; y += lineHeight; } else line = test;
+    }
+    if (line) { ctx.fillText(line, x, y); y += lineHeight; }
+    return y;
+  }
+
+  function exportOptions() {
+    return {
+      kind: ui.exportKind,
+      paper: $('exportPaper').value,
+      quality: Number($('exportQuality').value),
+      camera: $('exportCamera').value,
+      background: $('exportBackground').value,
+      dims: $('exportDims').checked,
+      labels: $('exportLabels').checked,
+      title: $('exportTitle').checked
+    };
+  }
+
+  let previewTimer = null;
+  function updateExportPreview() {
+    const options = exportOptions();
+    document.querySelectorAll('#exportForm [data-for]').forEach(node => { node.hidden = !node.dataset.for.split(' ').includes(options.kind); });
+    document.querySelectorAll('#exportKind button').forEach(button => button.classList.toggle('selected', button.dataset.kind === options.kind));
+    clearTimeout(previewTimer);
+    previewTimer = setTimeout(async () => {
+      if (options.kind === 'png3d') {
+        const v = ensure3D();
+        if (!v) { $('exportPreview').removeAttribute('src'); return; }
+        sync3D();
+        const blob = await v.capture({ width: 640, height: 420, camera: options.camera === 'current' ? undefined : options.camera, background: options.background });
+        $('exportPreview').src = URL.createObjectURL(blob);
+      } else {
+        const sheet = renderSheet({ ...options, width: 900 });
+        $('exportPreview').src = sheet.toDataURL('image/png');
+      }
+    }, 80);
+  }
+
+  async function runExport() {
+    const options = exportOptions();
+    const base = `zuglak-${safeName(room().name)}-${safeName(room().active)}`;
+    const button = $('exportRun');
+    button.disabled = true;
+    try {
+      if (options.kind === 'png3d') {
+        const v = ensure3D();
+        if (!v) throw new Error('A 3D nézet nem érhető el.');
+        sync3D();
+        const width = Math.min(4096, 1600 * options.quality);
+        const height = Math.round(width * 0.66);
+        const blob = await v.capture({ width, height, camera: options.camera === 'current' ? undefined : options.camera, background: options.background });
+        download(`${base}-3d.png`, blob);
+      } else {
+        const width = { 1: 2400, 2: 3600, 3: 4960 }[options.quality] || 3600;
+        const sheet = renderSheet({ ...options, width, background: options.kind === 'pdf2d' && options.background === 'transparent' ? '#ffffff' : options.background });
+        if (options.kind === 'png2d') {
+          const blob = await new Promise(resolve => sheet.toBlob(resolve, 'image/png'));
+          download(`${base}.png`, blob);
+        } else {
+          const blob = await new Promise(resolve => sheet.toBlob(resolve, 'image/jpeg', 0.93));
+          const bytes = new Uint8Array(await blob.arrayBuffer());
+          const pdf = Pdf.createImagePdf({ jpeg: bytes, paper: options.paper, title: `${room().name} – ${room().active}` });
+          download(`${base}.pdf`, new Blob([pdf], { type: 'application/pdf' }));
+        }
+      }
+      toast('Export elkészült');
+    } catch (error) {
+      console.error(error);
+      toast(error.message || 'Az export nem sikerült.');
+    } finally {
+      button.disabled = false;
+    }
+  }
+
+  // ------------------------------------------------------------------ IKEA import (preserved from 1.x)
+  let resolvedImport = null;
+  const productTypeForCategory = category => ({ sofas: 'sofa', wardrobes: 'wardrobe', beds: 'bed', tables: 'table', chairs: 'chair', storage: 'shelf' })[category] || 'custom';
   function fillImportFields(product, locked = false) {
     $('ikeaName').value = product.name || '';
     $('ikeaProductId').value = product.productId || '';
     $('ikeaWidth').value = product.width || '';
     $('ikeaDepth').value = product.depth || '';
     $('ikeaHeight').value = product.height || '';
-    $('ikeaCategory').value = product.category || 'storage';
-    ['ikeaName', 'ikeaProductId', 'ikeaWidth', 'ikeaDepth', 'ikeaHeight'].forEach(id => {
-      $(id).readOnly = locked;
-    });
+    $('ikeaCategory').value = product.ikeaCategory || product.category || 'storage';
+    ['ikeaName', 'ikeaProductId', 'ikeaWidth', 'ikeaDepth', 'ikeaHeight'].forEach(id => { $(id).readOnly = locked; });
     $('ikeaCategory').disabled = locked;
   }
-
   function resolveIkeaUrl() {
     const parsed = Core.parseIkeaProductUrl($('ikeaUrl').value);
     resolvedImport = null;
+    $('ikeaAiRow').hidden = true;
     $('ikeaManualFields').hidden = true;
     $('ikeaImportOk').disabled = true;
     $('ikeaSourceLink').hidden = true;
-    if (!parsed.ok) {
-      $('ikeaImportStatus').className = 'import-status error';
-      $('ikeaImportStatus').textContent = parsed.error;
-      return;
-    }
+    if (!parsed.ok) { $('ikeaImportStatus').className = 'import-status error'; $('ikeaImportStatus').textContent = parsed.error; return; }
     $('ikeaUrl').value = parsed.productUrl;
     $('ikeaSourceLink').href = parsed.productUrl;
     $('ikeaSourceLink').hidden = false;
-    const known = Ikea.products.find(product => product.productId === parsed.productId);
+    const known = Catalog.ikea.find(product => product.productId === parsed.productId);
     if (known) {
       resolvedImport = known;
       fillImportFields(known, true);
       $('ikeaImportStatus').className = 'import-status success';
-      $('ikeaImportStatus').textContent = `Felismert termék: ${known.name}. A méreteket a ${Ikea.verifiedAt} napján ellenőrzött helyi katalógusból töltöttük be.`;
+      $('ikeaImportStatus').textContent = `Felismert termék: ${known.name}. A méreteket a ${known.verifiedAt || Catalog.ikeaVerifiedAt} napján ellenőrzött helyi katalógusból töltöttük be.`;
     } else {
-      fillImportFields({
-        name: parsed.suggestedName,
-        productId: parsed.productId,
-        category: 'storage'
-      }, false);
+      fillImportFields({ name: parsed.suggestedName, productId: parsed.productId, category: 'storage' }, false);
+      $('ikeaAiRow').hidden = false;
+      $('ikeaAiRead').disabled = !aiKey;
+      $('ikeaAiHint').textContent = aiKey ? 'Az AI megnyitja a termékoldalt, és kitölti a mezőket. Hozzáadás előtt ellenőrizd őket.' : 'Ha az AI fülön megadod az Anthropic API-kulcsot, a méreteket az AI is be tudja olvasni.';
       $('ikeaImportStatus').className = 'import-status warning';
       $('ikeaImportStatus').textContent = 'Ehhez a termékhez nincs ellenőrzött helyi adat. Nyisd meg a linket, és másold be a termékoldalon szereplő külső méreteket. Nem következtetünk hiányzó adatra.';
     }
     $('ikeaManualFields').hidden = false;
     $('ikeaImportOk').disabled = false;
   }
-
   function readImportForm() {
-    if (resolvedImport) return Core.normalizeProduct(resolvedImport);
-    const value = {
-      name: $('ikeaName').value,
-      productId: $('ikeaProductId').value,
-      productUrl: $('ikeaUrl').value,
-      width: $('ikeaWidth').value,
-      depth: $('ikeaDepth').value,
-      height: $('ikeaHeight').value,
-      category: $('ikeaCategory').value,
-      type: resolvedImport?.type || productTypeForCategory($('ikeaCategory').value)
-    };
-    return Core.normalizeProduct(value);
+    if (resolvedImport) return resolvedImport;
+    const category = $('ikeaCategory').value;
+    const normalized = Core.normalizeProduct({
+      name: $('ikeaName').value, productId: $('ikeaProductId').value, productUrl: $('ikeaUrl').value,
+      width: $('ikeaWidth').value, depth: $('ikeaDepth').value, height: $('ikeaHeight').value,
+      category, type: productTypeForCategory(category)
+    });
+    return { ...normalized, key: `fav-${normalized.productId}`, ikeaCategory: category, category: ({ sofas: 'sofas', wardrobes: 'wardrobes', beds: 'beds', tables: 'tables', chairs: 'chairs', storage: 'storage' })[category] || 'storage', model: Catalog.ikeaModel(normalized), source: 'ikea', materials: {} };
   }
 
-  function openIkeaDialog() {
-    resolvedImport = null;
-    $('ikeaForm').reset();
-    $('ikeaManualFields').hidden = true;
-    $('ikeaImportOk').disabled = true;
-    $('ikeaSourceLink').hidden = true;
-    fillImportFields({}, false);
-    $('ikeaImportStatus').className = 'import-status';
-    $('ikeaImportStatus').textContent = 'Nem végzünk háttérben webes adatgyűjtést vagy jogosulatlan scrapinget.';
-    $('ikeaDialog').showModal();
-    setTimeout(() => $('ikeaUrl').focus(), 0);
+  // ------------------------------------------------------------------ AI tervező (Anthropic Claude)
+  const AI = window.ZuglakAI;
+  let aiState = AI.loadState(localStorage);
+  // Costs are never shown; remove any stored by earlier versions.
+  Object.values(aiState.chats || {}).forEach(chat => { delete chat.totalCost; (chat.log || []).forEach(entry => { delete entry.cost; }); });
+  let aiKey = AI.loadKey(localStorage);
+  let aiAbort = null;
+  let aiSettingsOpen = false;
+  const aiChat = (roomId = ui.roomId) => aiState.chats[roomId] || (aiState.chats[roomId] = AI.emptyChat());
+  const aiModelLabel = id => (AI.MODELS.find(value => value.id === id) || { label: id }).label.split(' – ')[0];
+
+  function saveAi() {
+    if (AI.saveState(localStorage, aiState)) return;
+    // Storage full: drop the API history (not the visible log) of the other rooms, then retry.
+    Object.entries(aiState.chats).forEach(([id, chat]) => { if (id !== ui.roomId) { chat.api = []; chat.pending = []; } });
+    if (!AI.saveState(localStorage, aiState)) toast('A beszélgetés nem fért el a böngésző tárhelyén.');
   }
 
-  function download(name, blob) {
-    const url = URL.createObjectURL(blob);
-    const anchor = document.createElement('a');
-    anchor.href = url;
-    anchor.download = name;
-    anchor.click();
-    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  function aiProducts() {
+    const seen = new Set();
+    return [...Catalog.all, ...favorites.map(favoriteProduct)].filter(product => !seen.has(product.key) && seen.add(product.key));
   }
 
-  canvas.addEventListener('pointerdown', event => {
-    event.preventDefault();
-    canvas.setPointerCapture(event.pointerId);
-    const point = localPoint(event);
-    const location = world(point);
-    if (mode === 'pan' || spaceDown || event.button === 1) {
-      drag = { type: 'pan', start: point, view: { ...view } };
-      return;
-    }
-    if (mode === 'walls') {
-      if (!scale()) { flash('Előbb kalibráld az alaprajzot.'); setMode('calibrate'); return; }
-      const geometry = activeGeometry();
-      if (!geometry) { flash('Hozz létre egy szobageometriát az „Új geometria” gombbal.'); return; }
-      const vertexIndex = hitVertexAt(location);
-      if (vertexIndex >= 0) {
-        if (!geometry.closed && vertexIndex === 0 && geometry.vertices.length >= 3) {
-          closeActiveGeometry();
-          return;
-        }
-        selectedVertex = vertexIndex;
-        selectedArchitecture = null;
-        drag = { type: 'vertex', index: vertexIndex };
-        renderProps(); draw();
-        return;
-      }
-      if (geometry.closed) { selectedVertex = null; renderProps(); draw(); flash('A zárt geometrián a meglévő falpontok húzhatók.'); return; }
-      const pointCm = pointToCm(location);
-      geometry.vertices.push({ id: idFactory(), x: pointCm.x, y: pointCm.y });
-      if (geometry.vertices.length > 1) geometry.confirmedWalls.push(false);
-      selectedVertex = geometry.vertices.length - 1;
-      save(); renderGeometryControls(); renderProps(); draw();
-      return;
-    }
-    if (mode === 'openings') {
-      const architecture = hitArchitectureAt(location);
-      if (architecture) {
-        selectedArchitecture = architecture;
-        renderProps(); draw();
-      } else if (openingTool) addArchitectureAt(location);
-      else flash('Válassz fent ajtót, ablakot vagy radiátort, majd kattints egy falra.');
-      return;
-    }
-    if (mode === 'calibrate' || mode === 'measure') {
-      if (!lineStart) {
-        lineStart = location;
-        lineEnd = location;
-        flash('Válaszd ki a második pontot.', 0);
-      } else {
-        lineEnd = location;
-        const length = Math.hypot(location.x - lineStart.x, location.y - lineStart.y);
-        if (length < 3) {
-          flash('A kijelölt szakasz túl rövid.');
-          lineStart = lineEnd = null;
-          draw();
-          return;
-        }
-        if (mode === 'calibrate') {
-          ask('Méretarány beállítása', 'Add meg a kijelölt szakasz valós hosszát centiméterben.', [
-            { key: 'cm', label: 'Valós hossz (cm)', value: '100', type: 'number' }
-          ]).then(value => {
-            if (value && Number(value.cm) > 0) {
-              const nextScale = length / Number(value.cm);
-              room().pxPerCm = nextScale;
-              save();
-              flash(`Méretarány beállítva: 1 cm = ${nextScale.toFixed(2)} px`);
-              setMode('select');
-            }
-            lineStart = lineEnd = null;
-            draw();
-          });
-        } else {
-          if (scale()) {
-            lastMeasurement = { start: { ...lineStart }, end: { ...lineEnd }, cm: length / scale() };
-            flash(`Mért távolság: ${(length / scale()).toFixed(1)} cm`, 8000);
-          }
-          else flash('Előbb kalibráld az alaprajz méretarányát.');
-          lineStart = lineEnd = null;
-        }
-      }
-      draw();
-      return;
-    }
-    const item = hit(location);
-    selected = item?.id || null;
-    if (item) drag = { type: 'furniture', id: item.id, from: location, x: item.x, y: item.y };
-    renderProps();
-    draw();
-  });
-
-  canvas.addEventListener('pointermove', event => {
-    const point = localPoint(event);
-    const location = world(point);
-    if (drag?.type === 'pan') {
-      view.x = drag.view.x + point.x - drag.start.x;
-      view.y = drag.view.y + point.y - drag.start.y;
-      draw();
-    } else if (drag?.type === 'furniture') {
-      const item = items().find(value => value.id === drag.id);
-      if (item) {
-        item.x = drag.x + location.x - drag.from.x;
-        item.y = drag.y + location.y - drag.from.y;
-        snapGuides = [];
-        if (snapEnabled && scale()) {
-          const itemCm = itemToCm(item);
-          const geometry = activeGeometry();
-          const snapped = Geometry.snapFurniture(itemCm, {
-            threshold: 10 / (view.z * scale()),
-            walls: $('snapWalls').checked && Boolean(geometry),
-            roomVertices: geometry?.vertices,
-            roomClosed: geometry?.closed,
-            furniture: $('snapFurniture').checked,
-            otherItems: items().filter(value => value.id !== item.id).map(itemToCm),
-            grid: $('snapGrid').checked,
-            gridSize: 5
-          });
-          item.x = snapped.x * scale();
-          item.y = snapped.y * scale();
-          snapGuides = snapped.guides;
-        }
-        draw();
-      }
-    } else if (drag?.type === 'vertex') {
-      const geometry = activeGeometry();
-      const vertex = geometry?.vertices?.[drag.index];
-      if (vertex && scale()) {
-        const pointCm = pointToCm(location);
-        vertex.x = pointCm.x;
-        vertex.y = pointCm.y;
-        const previousWall = (drag.index - 1 + geometry.vertices.length) % geometry.vertices.length;
-        geometry.confirmedWalls[previousWall] = false;
-        geometry.confirmedWalls[drag.index] = false;
-        draw();
-      }
-    } else if (lineStart && !drag) {
-      lineEnd = location;
-      draw();
-    }
-  });
-
-  function endDrag() {
-    if (drag?.type === 'furniture') {
-      const item = items().find(value => value.id === drag.id);
-      save(); renderProps(); draw();
-    } else if (drag?.type === 'vertex') {
-      save(); renderGeometryControls(); renderProps(); draw();
-    }
-    snapGuides = [];
-    drag = null;
+  function aiFormat(text) {
+    return escapeHtml(text).replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>').replace(/^#{1,4}\s*/gm, '');
   }
 
-  canvas.addEventListener('pointerup', endDrag);
-  canvas.addEventListener('pointercancel', endDrag);
-  canvas.addEventListener('wheel', event => {
-    event.preventDefault();
-    zoom(Math.exp(-event.deltaY * 0.0014), localPoint(event));
-  }, { passive: false });
+  function setAiStatus(text) { $('aiStatus').textContent = text || ''; }
 
-  window.addEventListener('keydown', event => {
-    const typing = ['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement?.tagName);
-    if (!typing && (event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'z') {
-      event.preventDefault(); event.shiftKey ? redo() : undo(); return;
+  function renderAiSettings() {
+    const open = aiSettingsOpen || !aiKey;
+    $('aiSettings').hidden = !open;
+    $('aiSettingsToggle').setAttribute('aria-expanded', String(open));
+    $('aiKeyState').textContent = aiKey ? `Mentett kulcs: …${aiKey.slice(-4)}` : 'Nincs mentett kulcs';
+    $('aiKeyClear').hidden = !aiKey;
+    const select = $('aiModel');
+    if (!select.options.length) AI.MODELS.forEach(model => { const option = document.createElement('option'); option.value = model.id; option.textContent = model.label; select.append(option); });
+    select.value = aiState.model || AI.DEFAULT_MODEL;
+  }
+
+  function aiCardNode(card, roomId) {
+    const node = document.createElement('div');
+    node.className = 'ai-card';
+    const exists = Boolean(data.rooms[roomId]?.variants[card.variant]);
+    node.innerHTML = `<strong></strong><span class="fineprint"></span>${card.warnings.length ? '<span class="ai-warn"></span>' : ''}<div class="button-row"></div><details><summary>Bútorlista és indoklás</summary><ol></ol></details>`;
+    node.querySelector('strong').textContent = `✓ ${card.created ? 'Új változat' : 'Módosítva'}: „${card.variant}” · ${card.count} bútor`;
+    node.querySelector('.fineprint').textContent = exists
+      ? 'Szerkeszthető: húzd, forgasd, töröld a bútorokat, vagy kérj módosítást. Visszavonás: Ctrl+Z.'
+      : 'Ez a változat azóta törölve vagy átnevezve lett.';
+    if (card.warnings.length) node.querySelector('.ai-warn').textContent = `Figyelem: ${card.warnings.join('; ')}.`;
+    const open = document.createElement('button');
+    open.type = 'button'; open.className = 'button small'; open.textContent = 'Megnyitás';
+    open.disabled = !exists || (roomId === ui.roomId && room().active === card.variant);
+    open.onclick = () => { if (roomId !== ui.roomId) openRoom(roomId); switchVariant(card.variant); };
+    node.querySelector('.button-row').append(open);
+    const list = node.querySelector('ol');
+    card.items.forEach(value => {
+      const li = document.createElement('li');
+      li.textContent = value.name;
+      if (value.reason) { const small = document.createElement('small'); small.textContent = ` – ${value.reason}`; li.append(small); }
+      list.append(li);
+    });
+    return node;
+  }
+
+  function renderAiPanel() {
+    if (!$('aiLog')) return;
+    renderAiSettings();
+    const chat = aiChat();
+    const busy = Boolean(aiAbort);
+    $('aiContext').textContent = `${room().name} · aktív változat: ${room().active}`;
+    const log = $('aiLog');
+    log.innerHTML = '';
+    if (!chat.log.length) {
+      log.innerHTML = '<div class="ai-empty">Írd le, kinek és mire készül a helyiség. Az AI a valós alaprajz (falak, ajtó nyitási íve, ablakok, kiugrások) és a katalógus méretei alapján berendezi, és az eredményt <strong>új, szerkeszthető változatként</strong> kapod meg. Utána kérhetsz módosítást vagy másik alternatívát.</div>';
     }
-    if (!typing && (event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'y') {
-      event.preventDefault(); redo(); return;
-    }
-    if (!typing && (event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'd' && selected) {
-      event.preventDefault(); duplicateSelected(); return;
-    }
-    if (!typing && selected && ['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(event.key)) {
-      event.preventDefault();
-      const item = items().find(value => value.id === selected);
-      if (item) {
-        const step = (event.shiftKey ? 10 : 1) * (scale() || 2);
-        if (event.key === 'ArrowLeft') item.x -= step;
-        if (event.key === 'ArrowRight') item.x += step;
-        if (event.key === 'ArrowUp') item.y -= step;
-        if (event.key === 'ArrowDown') item.y += step;
-        save(); draw();
+    for (const entry of chat.log) {
+      const node = document.createElement('div');
+      node.className = `ai-msg ${entry.role}`;
+      node.innerHTML = aiFormat(entry.text || '');
+      if (entry.card) node.append(aiCardNode(entry.card, ui.roomId));
+      if (entry.role === 'assistant' && entry.model) {
+        const meta = document.createElement('span');
+        meta.className = 'ai-meta';
+        meta.textContent = `${aiModelLabel(entry.model)}${entry.fixes ? ` · ${entry.fixes} javítási kör` : ''}${entry.shortened ? ' · tömörített újrapróbálkozás' : ''}`;
+        node.append(meta);
       }
-      return;
+      log.append(node);
     }
-    if (event.code === 'Space' && !typing) { event.preventDefault(); spaceDown = true; }
-    if (event.key === 'Escape') {
-      selected = null; selectedVertex = null; selectedArchitecture = null; openingTool = null;
-      snapGuides = []; lineStart = lineEnd = null; lastMeasurement = null;
-      document.querySelectorAll('#openingTools button').forEach(button => button.classList.remove('selected'));
-      renderProps(); draw();
+    if (busy) {
+      const node = document.createElement('div');
+      node.className = 'ai-msg assistant';
+      node.innerHTML = '<span class="ai-thinking"><span></span><span></span><span></span></span>';
+      log.append(node);
     }
-    if (!typing && (event.key === 'Delete' || event.key === 'Backspace')) {
-      if (mode === 'openings' && selectedArchitecture) {
-        const geometry = activeGeometry();
-        geometry.objects = geometry.objects.filter(value => value.id !== selectedArchitecture.id);
-        selectedArchitecture = null;
-        save(); renderProps(); draw();
-      } else if (mode === 'select') removeSelected();
+    log.scrollTop = log.scrollHeight;
+    const suggestions = chat.log.some(entry => entry.card)
+      ? ['Adj egy másik alternatívát', 'Legyen több szabad játszóhely', 'Tedd az íróasztalt az ablak alá']
+      : ['Ez a szoba három kislánynak készül. Kell 3 ágy, tanulósarok és sok tárhely.', 'Rendezd be dolgozószobának vendégággyal.', 'Tartsd meg a mostani bútorokat, csak rendezd át őket jobban.'];
+    $('aiSuggestions').innerHTML = '';
+    if (!busy) suggestions.forEach(text => {
+      const button = document.createElement('button');
+      button.type = 'button'; button.textContent = text;
+      button.onclick = () => { $('aiInput').value = text; $('aiInput').focus(); };
+      $('aiSuggestions').append(button);
+    });
+    $('aiSend').disabled = busy;
+    $('aiStop').hidden = !busy;
+    $('aiInput').disabled = busy;
+    $('aiNewChat').disabled = busy || !chat.log.length;
+    if (!busy) setAiStatus(aiKey ? '' : 'Add meg az API-kulcsot a beállításokban.');
+  }
+
+  function applyAiProposal(roomId, proposal) {
+    const targetRoom = data.rooms[roomId];
+    const chat = aiChat(roomId);
+    const input = proposal.input;
+    let target = targetRoom.active;
+    let created = false;
+    if (input.new_variant || !targetRoom.variants[target] || !chat.variants.includes(target)) {
+      target = Core.createVariant(targetRoom, String(input.variant_name || '').trim().slice(0, 60) || 'AI javaslat', { now: Date.now() });
+      chat.variants.push(target);
+      created = true;
     }
-  });
-  window.addEventListener('keyup', event => { if (event.code === 'Space') spaceDown = false; });
-  window.addEventListener('resize', draw);
-
-  ['select', 'walls', 'openings', 'calibrate', 'measure', 'pan'].forEach(name => {
-    $(`mode${name[0].toUpperCase()}${name.slice(1)}`).onclick = () => setMode(name);
-  });
-  $('zoomOut').onclick = () => zoom(1 / 1.25);
-  $('zoomIn').onclick = () => zoom(1.25);
-  $('fit').onclick = fit;
-  $('undo').onclick = undo;
-  $('redo').onclick = redo;
-  $('showReference').onchange = draw;
-
-  $('snap').onclick = () => {
-    snapEnabled = !snapEnabled;
-    $('snap').classList.toggle('selected', snapEnabled);
-    $('snap').setAttribute('aria-pressed', String(snapEnabled));
-    $('snap').textContent = `⊞ Igazítás: ${snapEnabled ? 'be' : 'ki'}`;
-  };
-
-  $('geometrySelect').onchange = event => {
-    room().activeGeometryId = event.target.value || null;
-    selectedVertex = null;
-    selectedArchitecture = null;
-    save(); renderGeometryControls(); renderProps(); draw();
-  };
-  $('floorMaterial').onchange = event => {
-    const geometry = activeGeometry();
-    if (!geometry) return;
-    geometry.floorMaterial = event.target.value;
-    save(); draw();
-    flash('Padlóburkolat frissítve. A geometriai méretek nem változtak.');
-  };
-  $('newGeometry').onclick = createGeometry;
-  $('closeGeometry').onclick = closeActiveGeometry;
-  $('deleteGeometry').onclick = () => {
-    const geometry = activeGeometry();
-    if (!geometry || !confirm(`Biztosan törlöd ezt a szobageometriát és a hozzá tartozó nyílászárókat?\n\n${geometry.name}`)) return;
-    room().geometries = geometries().filter(value => value.id !== geometry.id);
-    room().activeGeometryId = room().geometries[0]?.id || null;
-    selectedVertex = null;
-    selectedArchitecture = null;
-    save(); renderGeometryControls(); renderProps(); draw();
-  };
-  const openingLabels = { door: 'Ajtó', window: 'Ablak', radiator: 'Radiátor' };
-  for (const [type, id] of [['door', 'addDoor'], ['window', 'addWindow'], ['radiator', 'addRadiator']]) {
-    $(id).onclick = () => {
-      openingTool = openingTool === type ? null : type;
-      document.querySelectorAll('#openingTools button').forEach(button => button.classList.toggle('selected', button.id === id && openingTool === type));
-      flash(openingTool ? `${openingLabels[type]}: kattints a kívánt fal közelébe.` : 'Elhelyezés megszakítva.');
+    targetRoom.variants[target].items = proposal.built.items;
+    targetRoom.active = target;
+    if (roomId === ui.roomId) ui.selectedId = null;
+    commit('AI elrendezés');
+    refreshAll();
+    invalidateThumbs();
+    return {
+      variant: target,
+      created,
+      count: proposal.built.items.length,
+      warnings: proposal.issues.map(issue => issue.text),
+      summary: input.summary || '',
+      items: proposal.built.items.map((item, index) => ({ name: item.name, reason: proposal.built.reasons[index] || '' }))
     };
   }
-  for (const [id, other] of [['clearance70', 'clearance80'], ['clearance80', 'clearance70']]) {
-    $(id).onchange = () => { if ($(id).checked) $(other).checked = false; draw(); };
-  }
 
-  $('variant').onchange = event => {
-    room().active = event.target.value;
-    selected = null;
-    save(); renderProps(); draw();
-  };
-
-  $('newVariant').onclick = async () => {
-    const answer = await ask('Új berendezési változat', 'A jelenlegi változat bútorait lemásoljuk.', [
-      { key: 'name', label: 'Változat neve', value: 'Új változat' }
-    ]);
-    const name = answer?.name?.trim();
-    if (!name) return;
-    if (room().variants[name]) return flash('Már létezik ilyen nevű változat.');
-    room().variants[name] = { items: structuredClone(items()) };
-    room().active = name;
-    selected = null;
-    save(); renderVariants(); renderProps(); draw();
-  };
-
-  $('deleteVariant').onclick = () => {
-    if (Object.keys(room().variants).length < 2) return flash('Az utolsó változat nem törölhető.');
-    if (!confirm('Biztosan törlöd ezt a változatot?')) return;
-    delete room().variants[room().active];
-    room().active = Object.keys(room().variants)[0];
-    selected = null;
-    save(); renderVariants(); renderProps(); draw();
-  };
-
-  $('renameRoom').onclick = async () => {
-    const answer = await ask('Helyiség átnevezése', 'Adj beszédes nevet az alaprajznak.', [
-      { key: 'name', label: 'Helyiség neve', value: room().name }
-    ]);
-    if (answer?.name?.trim()) {
-      room().name = answer.name.trim();
-      $('canvasRoomName').textContent = room().name;
-      save(); renderRooms();
+  async function sendAi(text) {
+    const message = String(text || '').trim();
+    if (!message || aiAbort) return;
+    if (!aiKey) { aiSettingsOpen = true; renderAiPanel(); toast('Előbb add meg az Anthropic API-kulcsot.'); $('aiKey').focus(); return; }
+    const roomId = ui.roomId;
+    const geom = geometry();
+    const chat = aiChat(roomId);
+    if (!geom?.closed || geom.vertices.length < 3) {
+      chat.log.push({ role: 'user', text: message }, { role: 'error', text: 'Ennek a helyiségnek nincs zárt alaprajza, ezért nem tudom berendezni. Zárd le a falakat a Helyiség fülön.' });
+      saveAi(); renderAiPanel(); return;
     }
-  };
-
-  $('resetRoom').onclick = () => {
-    if (!confirm('Töröljük az aktuális változat összes bútorát?')) return;
-    room().variants[room().active].items = [];
-    selected = null;
-    save(); renderProps(); draw();
-  };
-
-  $('customFurniture').onclick = async () => {
-    const value = await ask('Egyedi méretű bútor', 'Add meg a bútor pontos méretét centiméterben.', [
-      { key: 'name', label: 'Megnevezés', value: 'Saját bútor' },
-      { key: 'w', label: 'Szélesség (cm)', value: '120', type: 'number' },
-      { key: 'h', label: 'Mélység (cm)', value: '60', type: 'number' }
-    ]);
-    if (value && Number(value.w) > 0 && Number(value.h) > 0) {
-      addBasicItem({ type: 'custom', name: value.name.trim() || 'Saját bútor', width: Number(value.w), depth: Number(value.h) });
-    }
-  };
-
-  $('floorPlanUpload').onchange = event => {
-    const file = event.target.files?.[0];
-    event.target.value = '';
-    if (!file) return;
-    if (!/^image\/(png|jpeg|webp)$/.test(file.type)) return flash('PNG, JPEG vagy WebP alaprajz tölthető fel.');
-    if (file.size > 3 * 1024 * 1024) return flash('A helyi mentés védelmében legfeljebb 3 MB-os alaprajz tölthető fel.', 8000);
-    const reader = new FileReader();
-    reader.onerror = () => flash('A képfájl nem olvasható.');
-    reader.onload = async () => {
-      const testImage = new Image();
-      testImage.onerror = () => flash('A kiválasztott fájl nem érvényes kép.');
-      testImage.onload = async () => {
-        const answer = await ask('Saját alaprajz', 'A kép külön helyiségként kerül a tervek közé. Ezután kalibráld egy ismert szakasz alapján.', [
-          { key: 'name', label: 'Helyiség neve', value: file.name.replace(/\.[^.]+$/, '') || 'Saját alaprajz' }
-        ]);
-        if (!answer?.name?.trim()) return;
-        const id = `custom-${idFactory()}`;
-        const custom = { id, name: answer.name.trim(), url: String(reader.result), pxPerCm: null, reference: null, isCustom: true };
-        data.customPlans.push(custom);
-        data.rooms[id] = { name: custom.name, pxPerCm: null, active: 'Alap', variants: { Alap: emptyVariant() }, geometries: [], activeGeometryId: null };
-        if (!save()) {
-          data.customPlans = data.customPlans.filter(value => value.id !== id);
-          delete data.rooms[id];
-          return;
-        }
-        openRoom(id, false);
-        setMode('calibrate');
-      };
-      testImage.src = String(reader.result);
+    if (archEditing()) finishArchitecture();
+    let brief;
+    try { brief = AI.buildRoomBrief({ roomName: room().name, geom, items: items(), Geometry, Catalog }); }
+    catch (error) { toast(error.message); return; }
+    const sourceItems = JSON.parse(JSON.stringify(items()));
+    const activeName = room().active;
+    const first = chat.api.length === 0;
+    const userContent = `${first ? `A HELYISÉG ADATAI:\n${brief.text}` : `Aktív változat: „${activeName}”. ${AI.currentStateText(brief.brief)}`}\n\nA FELHASZNÁLÓ KÉRÉSE:\n${message}`;
+    const evaluate = input => {
+      const inPlace = !input.new_variant && chat.variants.includes(activeName);
+      const built = AI.buildLayoutItems(input, { base: brief.base, existingItems: sourceItems, productByKey: key => aiProducts().find(value => value.key === key), Core, Catalog, Geometry, idFactory, keepIds: inPlace });
+      const issues = AI.analyzeLayout(built.items, geom, { Geometry, Catalog });
+      return { built, issues, report: AI.issueReport(built, issues, brief.base, Geometry) };
     };
-    reader.readAsDataURL(file);
-  };
-
-  document.querySelectorAll('[data-catalog-tab]').forEach(button => {
-    button.onclick = () => {
-      catalogTab = button.dataset.catalogTab;
-      populateCategoryFilter();
-      renderCatalog();
+    chat.log.push({ role: 'user', text: message });
+    $('aiInput').value = '';
+    const apiLength = chat.api.length;
+    const pendingBefore = [...chat.pending];
+    aiAbort = new AbortController();
+    renderAiPanel();
+    const model = aiState.model || AI.DEFAULT_MODEL;
+    // Live progress: round label + what the model is doing right now + elapsed time.
+    const started = Date.now();
+    const progress = { round: 'Az AI tervez', phase: 'Kapcsolódás', count: 0 };
+    const showProgress = () => {
+      const seconds = Math.round((Date.now() - started) / 1000);
+      const detail = progress.phase === 'tool' ? `elrendezés összeállítása${progress.count ? ` (${progress.count} bútor)` : ''}` : progress.phase === 'thinking' ? 'gondolkodik' : progress.phase === 'text' ? 'ír' : progress.phase;
+      setAiStatus(`${progress.round} – ${detail}… ${seconds} mp`);
     };
-  });
-  $('catalogSearch').addEventListener('input', renderCatalog);
-  $('catalogCategory').addEventListener('change', renderCatalog);
-
-  Object.entries(Ikea.categories).forEach(([value, label]) => {
-    const option = document.createElement('option');
-    option.value = value;
-    option.textContent = label;
-    $('ikeaCategory').append(option);
-  });
-  $('importIkea').onclick = openIkeaDialog;
-  $('resolveIkea').onclick = resolveIkeaUrl;
-  $('ikeaUrl').addEventListener('keydown', event => {
-    if (event.key === 'Enter') { event.preventDefault(); resolveIkeaUrl(); }
-  });
-  $('ikeaForm').addEventListener('submit', event => {
-    if (event.submitter?.value === 'cancel') return;
-    event.preventDefault();
+    const ticker = setInterval(showProgress, 1000);
+    showProgress();
     try {
-      const product = readImportForm();
-      addProduct(product);
-      if ($('ikeaSaveFavorite').checked && !isFavorite(product.productId)) {
-        favorites = Core.saveFavorites(localStorage, [...favorites, product]);
-        renderCatalog();
-      }
-      $('ikeaDialog').close('import');
+      const result = await AI.runLayoutTurn({
+        apiKey: aiKey, model, signal: aiAbort.signal, messages: chat.api,
+        catalogText: AI.catalogTable(aiProducts()), userContent, evaluate,
+        pendingToolUseIds: chat.pending,
+        onStatus: text => { progress.round = text.replace(/…$/, ''); progress.phase = 'Kapcsolódás'; progress.count = 0; showProgress(); },
+        onProgress: event => {
+          progress.phase = event.phase;
+          if (event.phase === 'tool' && event.json) progress.count = (event.json.match(/"center_x"/g) || []).length;
+        }
+      });
+      chat.pending = result.pendingToolUseIds;
+      const entry = { role: 'assistant', text: result.text || (result.proposal ? (result.proposal.input.summary || 'Elkészült az elrendezés.') : 'Nem érkezett válasz.'), model, fixes: result.fixes || 0, shortened: Boolean(result.shortened) };
+      if (result.proposal) entry.card = applyAiProposal(roomId, result.proposal);
+      chat.log.push(entry);
     } catch (error) {
-      $('ikeaImportStatus').className = 'import-status error';
-      $('ikeaImportStatus').textContent = error.message;
+      chat.api.length = apiLength;
+      chat.pending = pendingBefore;
+      chat.log.push({ role: 'error', text: error.status === 'aborted' ? 'Leállítva.' : (error.message || 'Ismeretlen hiba.') });
+      if (error.status === 401) { aiSettingsOpen = true; }
+    } finally {
+      clearInterval(ticker);
+      aiAbort = null;
+      saveAi();
+      renderAiPanel();
+      if (ui.leftTab === 'ai' && ui.roomId === roomId) $('aiInput').focus();
     }
-  });
+  }
 
-  $('exportJSON').onclick = () => {
-    const exportData = structuredClone(data);
+  function setupAi() {
+    renderAiSettings();
+    $('aiSettingsToggle').onclick = () => { aiSettingsOpen = !aiSettingsOpen || !aiKey; renderAiPanel(); };
+    $('aiKeySave').onclick = () => {
+      const value = $('aiKey').value.trim();
+      if (!value) { toast('Illeszd be a kulcsot.'); return; }
+      if (!AI.looksLikeKey(value)) { toast('Ez nem tűnik Anthropic API-kulcsnak (sk-ant-… kezdetű).'); return; }
+      aiKey = AI.saveKey(localStorage, value);
+      $('aiKey').value = '';
+      aiSettingsOpen = false;
+      renderAiPanel();
+      toast('API-kulcs elmentve ebben a böngészőben');
+      $('aiInput').focus();
+    };
+    $('aiKey').addEventListener('keydown', event => { if (event.key === 'Enter') { event.preventDefault(); $('aiKeySave').click(); } });
+    $('aiKeyClear').onclick = async () => {
+      if (!await confirmAction('API-kulcs törlése', 'A kulcs törlődik ebből a böngészőből. A beszélgetések megmaradnak.', 'Törlés')) return;
+      aiKey = AI.saveKey(localStorage, '');
+      renderAiPanel();
+    };
+    $('aiModel').onchange = () => { aiState.model = $('aiModel').value; saveAi(); };
+    $('aiComposer').addEventListener('submit', event => { event.preventDefault(); sendAi($('aiInput').value); });
+    $('aiInput').addEventListener('keydown', event => {
+      if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) { event.preventDefault(); sendAi($('aiInput').value); }
+    });
+    $('aiStop').onclick = () => aiAbort?.abort();
+    $('aiNewChat').onclick = async () => {
+      if (!await confirmAction('Új beszélgetés', 'Az eddigi beszélgetés törlődik ennél a helyiségnél. Az AI által létrehozott változatok megmaradnak.', 'Új beszélgetés')) return;
+      aiState.chats[ui.roomId] = AI.emptyChat();
+      saveAi();
+      renderAiPanel();
+    };
+
+    // IKEA: read an unknown product page with the AI (server-side web_fetch).
+    $('ikeaAiRead').onclick = async () => {
+      if (!aiKey) { toast('Az AI-olvasáshoz add meg az API-kulcsot az AI fülön.'); return; }
+      const url = $('ikeaUrl').value;
+      const button = $('ikeaAiRead');
+      button.disabled = true;
+      $('ikeaImportStatus').className = 'import-status';
+      $('ikeaImportStatus').textContent = 'Az AI beolvassa az IKEA termékoldalát… (10–30 másodperc)';
+      try {
+        const result = await AI.readIkeaProduct({ apiKey: aiKey, model: aiState.model || AI.DEFAULT_MODEL, url });
+        if (!$('ikeaDialog').open || $('ikeaUrl').value !== url) return;
+        if (result.name) $('ikeaName').value = result.name;
+        if (result.width) $('ikeaWidth').value = result.width;
+        if (result.depth) $('ikeaDepth').value = result.depth;
+        $('ikeaHeight').value = result.height || '';
+        if (result.category && [...$('ikeaCategory').options].some(option => option.value === result.category)) $('ikeaCategory').value = result.category;
+        const parsedId = Core.parseIkeaProductUrl(url).productId;
+        const idNote = result.productId && parsedId && result.productId.replace(/\D/g, '') !== parsedId.replace(/\D/g, '') ? ` Figyelem: az oldalon talált cikkszám (${result.productId}) eltér a linkben szereplőtől.` : '';
+        const missing = [!result.width && 'szélesség', !result.depth && 'mélység'].filter(Boolean);
+        $('ikeaImportStatus').className = `import-status ${missing.length ? 'error' : 'warning'}`;
+        $('ikeaImportStatus').textContent = `${missing.length ? `Hiányzik: ${missing.join(', ')} – add meg kézzel. ` : ''}Az AI által beolvasott adatok. Hozzáadás előtt ellenőrizd őket a termékoldalon.${result.notes ? ` Megjegyzés: ${result.notes}` : ''}${idNote}`;
+      } catch (error) {
+        if (!$('ikeaDialog').open) return;
+        $('ikeaImportStatus').className = 'import-status error';
+        $('ikeaImportStatus').textContent = error.message;
+      } finally {
+        button.disabled = false;
+      }
+    };
+  }
+
+  // ------------------------------------------------------------------ JSON backup
+  function exportJson() {
+    const exportData = JSON.parse(JSON.stringify(data));
     exportData.favoriteProducts = favorites;
-    exportData.exportedBy = 'Zuglak Studio 1.6';
-    download('zuglak-tervek.json', new Blob([JSON.stringify(exportData, null, 2)], { type: 'application/json' }));
-  };
+    exportData.exportedBy = 'Zuglak Studio 2.1';
+    exportData.exportedAt = new Date().toISOString();
+    download(`zuglak-tervek-${new Date().toISOString().slice(0, 10)}.json`, new Blob([JSON.stringify(exportData, null, 2)], { type: 'application/json' }));
+    toast('Biztonsági mentés letöltve');
+  }
 
-  $('importJSON').onchange = async event => {
-    const file = event.target.files?.[0];
-    if (!file) return;
+  async function importJson(file) {
     try {
       const imported = JSON.parse(await file.text());
-      if (!Core.isValidPlanData(imported, ORIGINAL_PLANS.map(value => value.id))) throw new Error('Hibás fájl');
-      if (!confirm('Betöltjük a fájlt? Ez felülírja a böngésző jelenlegi terveit.')) return;
+      if (!Core.isValidPlanData(imported, REQUIRED)) throw new Error('A fájl nem érvényes Zuglak tervfájl.');
+      if (!await confirmAction('Terv betöltése', 'A fájl felülírja a böngészőben lévő terveket. A betöltés visszavonható (Ctrl+Z).', 'Betöltés')) return;
       const importedFavorites = imported.favoriteProducts;
-      const nextData = Core.migratePlanData(imported, ORIGINAL_PLANS.map(value => value.id));
-      delete nextData.favoriteProducts;
-      delete nextData.exportedBy;
-      nextData.customPlans = Array.isArray(nextData.customPlans) ? nextData.customPlans : [];
-      const previousData = data;
-      const previousRoomId = roomId;
-      const previousSelected = selected;
-      data = nextData;
-      roomId = data.currentRoom && data.rooms[data.currentRoom] ? data.currentRoom : 'room1';
-      selected = null;
-      if (!save()) {
-        data = previousData;
-        roomId = previousRoomId;
-        selected = previousSelected;
-        if (history.at(-1) === lastSnapshot) history.pop();
-        future = [];
-        localStorage.setItem(Core.PLAN_STORAGE_KEY, lastSnapshot);
-        updateHistoryButtons();
-        throw new Error('A terv nem fér el a helyi tárhelyen.');
-      }
-      if (Array.isArray(importedFavorites)) {
-        try {
-          favorites = Core.saveFavorites(localStorage, importedFavorites);
-        } catch {
-          flash('A terv betöltődött, de a kedvencek mentéséhez nincs elég hely.', 8000);
-        }
-      }
-      populateCategoryFilter();
-      renderCatalog();
-      openRoom(roomId, false);
-      flash('Sikeres tervbetöltés.');
+      const next = Core.migratePlanData(imported, REQUIRED, migrateOptions);
+      delete next.favoriteProducts; delete next.exportedBy; delete next.exportedAt;
+      const previous = data;
+      data = next;
+      ui.roomId = data.rooms[data.currentRoom] ? data.currentRoom : 'room1';
+      ui.selectedId = null;
+      const snapshot = JSON.stringify(data);
+      if (!persist(snapshot)) { data = previous; throw new Error('A terv nem fér el a helyi tárhelyen.'); }
+      history.push(committed); future = []; committed = snapshot; updateHistoryButtons();
+      if (Array.isArray(importedFavorites)) { try { favorites = Core.saveFavorites(localStorage, importedFavorites); } catch { /* ignore */ } }
+      invalidateThumbs(); roomThumbs.clear();
+      fitView();
+      refreshAll();
+      toast('Terv betöltve');
     } catch (error) {
-      flash(error?.message === 'A terv nem fér el a helyi tárhelyen.'
-        ? error.message
-        : 'A JSON nem érvényes Zuglak tervfájl.');
-    } finally {
-      event.target.value = '';
+      toast(error.message || 'A JSON nem érvényes Zuglak tervfájl.', 6000);
     }
-  };
+  }
 
-  $('exportPNG').onclick = () => {
-    if (!image) return;
-    const output = document.createElement('canvas');
-    output.width = image.width;
-    output.height = image.height;
-    const previousContext = ctx;
-    const previousSelected = selected;
-    const previousSelectedVertex = selectedVertex;
-    const previousSelectedArchitecture = selectedArchitecture;
-    const previousWarningItemIds = warningItemIds;
-    const previousZoom = view.z;
+  // ------------------------------------------------------------------ keyboard
+  window.addEventListener('keydown', event => {
+    const typing = ['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement?.tagName) || document.querySelector('dialog[open]');
+    if (typing) return;
+    const ctrl = event.ctrlKey || event.metaKey;
+    const key = event.key.toLowerCase();
+    if (ctrl && key === 'z') { event.preventDefault(); event.shiftKey ? redo() : undo(); return; }
+    if (ctrl && key === 'y') { event.preventDefault(); redo(); return; }
+    if (ctrl && key === 'd') { event.preventDefault(); duplicateSelected(); return; }
+    if (ctrl && key === 's') { event.preventDefault(); persist(JSON.stringify(data)); toast('Mentve a böngészőbe'); return; }
+    if (ctrl) return;
+    if (['arrowleft', 'arrowright', 'arrowup', 'arrowdown'].includes(key) && selectedItem()) {
+      event.preventDefault();
+      const step = event.shiftKey ? 10 : 1;
+      nudgeSelected(key === 'arrowleft' ? -step : key === 'arrowright' ? step : 0, key === 'arrowup' ? -step : key === 'arrowdown' ? step : 0);
+      return;
+    }
+    if (event.code === 'Space') { spaceDown = true; canvas.style.cursor = 'grab'; event.preventDefault(); return; }
+    if (key === 'escape') {
+      if (ui.presentation) { setPresentation(false); return; }
+      if (ui.mode !== 'furnish') { if (ui.openingTool) { ui.openingTool = null; renderModeBanner(); } else finishArchitecture(); return; }
+      ui.measure = null; closeMenus(); select(null); return;
+    }
+    if ((key === 'delete' || key === 'backspace')) {
+      if (ui.mode === 'openings' && ui.selectedObjectId) {
+        const geom = geometry();
+        geom.objects = geom.objects.filter(value => value.id !== ui.selectedObjectId);
+        ui.selectedObjectId = null; commit('Nyílászáró törlése'); renderInspector(); requestRender();
+      } else if (ui.mode === 'walls' && ui.selectedVertex !== null) deleteVertex(ui.selectedVertex);
+      else deleteSelected();
+      event.preventDefault();
+      return;
+    }
+    if (key === 'r' && selectedItem()) { rotateSelected(event.shiftKey ? -90 : 90); return; }
+    if (key === 'v') setTool('select');
+    if (key === 'h') setTool('pan');
+    if (key === 'm') setTool('measure');
+    if (key === '1') setView('2d');
+    if (key === '2') setView('3d');
+    if (key === 'p') setPresentation(!ui.presentation);
+    if (key === '0') { if (ui.view === '2d') fitView(); else view3d?.resetCamera(); }
+    if (key === '+' || key === '=') zoomAt(1.2);
+    if (key === '-') zoomAt(1 / 1.2);
+  });
+  window.addEventListener('keyup', event => { if (event.code === 'Space') { spaceDown = false; canvas.style.cursor = ui.tool === 'pan' ? 'grab' : 'default'; } });
+  window.addEventListener('resize', () => requestRender());
+  document.addEventListener('click', closeMenus);
+
+  function setTool(tool) {
+    ui.tool = tool;
+    if (tool !== 'measure') ui.measure = null;
+    document.querySelectorAll('[data-tool]').forEach(button => button.classList.toggle('selected', button.dataset.tool === tool));
+    canvas.style.cursor = tool === 'pan' ? 'grab' : tool === 'measure' ? 'crosshair' : 'default';
+    if (tool === 'measure') toast('Mérés: kattints két pontra');
+    requestRender();
+  }
+
+  // ------------------------------------------------------------------ wiring
+  function init() {
+    Icons.hydrate();
+    setupAskDialog();
+    setupAi();
+    // restore layer prefs
     try {
-      ctx = output.getContext('2d');
-      ctx.drawImage(image, 0, 0);
-      selected = null;
-      selectedVertex = null;
-      selectedArchitecture = null;
-      warningItemIds = new Set();
-      view.z = 1;
-      drawRoomGeometry();
-      items().forEach(drawItem);
-    } finally {
-      ctx = previousContext;
-      selected = previousSelected;
-      selectedVertex = previousSelectedVertex;
-      selectedArchitecture = previousSelectedArchitecture;
-      warningItemIds = previousWarningItemIds;
-      view.z = previousZoom;
-    }
-    output.toBlob(blob => {
-      if (blob) download(`zuglak-${room().name.replace(/\W/g, '_')}-${room().active}.png`, blob);
-    }, 'image/png');
-  };
+      const prefs = JSON.parse(localStorage.getItem(prefsKey) || '{}');
+      for (const [id, value] of Object.entries(prefs.layers || {})) if ($(id) && typeof value === 'boolean') $(id).checked = value;
+      if (prefs.snap === false) { $('snap').setAttribute('aria-pressed', 'false'); $('snap').classList.remove('selected'); }
+    } catch { /* ignore */ }
 
-  updateHistoryButtons();
-  populateCategoryFilter();
-  renderCatalog();
-  openRoom(roomId, false);
-  setMode('select');
+    document.querySelectorAll('#viewSwitch button').forEach(button => { button.onclick = () => setView(button.dataset.view); });
+    document.querySelectorAll('.rail button').forEach(button => {
+      button.onclick = () => {
+        if (button.dataset.tab === ui.leftTab && window.matchMedia('(max-width: 860px)').matches) { document.body.classList.toggle('panel-open'); return; }
+        setLeftTab(button.dataset.tab);
+      };
+    });
+    document.querySelectorAll('#sourceFilter button').forEach(button => { button.onclick = () => { ui.catalogSource = button.dataset.source; savePrefs(); renderCatalog(); }; });
+    document.querySelectorAll('[data-tool]').forEach(button => { button.onclick = () => setTool(button.dataset.tool); });
+    $('catalogSearch').addEventListener('input', renderCatalog);
+    $('undo').onclick = undo; $('redo').onclick = redo;
+    $('zoomIn').onclick = () => zoomAt(1.25);
+    $('zoomOut').onclick = () => zoomAt(1 / 1.25);
+    $('fit').onclick = fitView; $('zoomLabel').onclick = fitView;
+    bindDropdown('roomButton', 'roomMenu', renderRoomMenu);
+    bindDropdown('variantButton', 'variantMenu', renderVariantMenu);
+    bindDropdown('layersButton', 'layersMenu');
+    $('snap').addEventListener('click', event => {
+      // Click on main toggle area toggles snapping; the chevron opens options.
+      event.stopPropagation();
+      const rect = $('snap').getBoundingClientRect();
+      if (event.clientX > rect.right - 26) { const open = $('snapMenu').hidden; closeMenus(); $('snapMenu').hidden = !open; return; }
+      const on = $('snap').getAttribute('aria-pressed') !== 'true';
+      $('snap').setAttribute('aria-pressed', String(on));
+      $('snap').classList.toggle('selected', on);
+      toast(on ? 'Illesztés bekapcsolva' : 'Illesztés kikapcsolva (szabad mozgatás)');
+      savePrefs();
+    });
+    $('snapMenu').addEventListener('click', event => event.stopPropagation());
+    for (const id of ['showDims', 'showItemDims', 'showLabels', 'showUnderlay', 'showGrid', 'darkWalls', 'snapWalls', 'snapFurniture', 'snapAlign', 'snapGrid', 'snapRotation']) {
+      $(id).addEventListener('change', () => { savePrefs(); requestRender(); if (id === 'showUnderlay' && ui.leftTab === 'room') renderRoomPanel(); });
+    }
+    document.querySelectorAll('#clearanceSwitch button').forEach(button => {
+      button.classList.toggle('selected', Number(button.dataset.clearance) === ui.clearance);
+      button.onclick = () => {
+        ui.clearance = Number(button.dataset.clearance);
+        document.querySelectorAll('#clearanceSwitch button').forEach(other => other.classList.toggle('selected', other === button));
+        savePrefs(); requestRender();
+      };
+    });
+    $('warningToggle').onclick = event => { event.stopPropagation(); $('warningList').hidden = !$('warningList').hidden; renderWarnings(); };
+    $('finishArchitecture').onclick = finishArchitecture;
+    $('presentButton').onclick = () => setPresentation(true);
+    $('exitPresentation').onclick = () => setPresentation(false);
+
+    // 3D toolbar
+    document.querySelectorAll('#cameraSwitch button').forEach(button => {
+      button.classList.toggle('selected', button.dataset.camera === ui.camera);
+      button.onclick = () => {
+        ui.camera = button.dataset.camera;
+        document.querySelectorAll('#cameraSwitch button').forEach(other => other.classList.toggle('selected', other === button));
+        view3d?.setCameraMode(ui.camera);
+        savePrefs();
+      };
+    });
+    $('resetCamera').onclick = () => view3d?.resetCamera();
+    const syncToggle = (id, key) => $(id).classList.toggle('active', Boolean(ui[key]));
+    $('cutawayToggle').onclick = () => { ui.cutaway = !ui.cutaway; syncToggle('cutawayToggle', 'cutaway'); savePrefs(); requestRender(); };
+    $('lampsToggle').onclick = () => { ui.lampsOn = !ui.lampsOn; syncToggle('lampsToggle', 'lampsOn'); savePrefs(); requestRender(); };
+    $('aoToggle').onclick = () => { ui.ao = !ui.ao; syncToggle('aoToggle', 'ao'); view3d?.setAO(ui.ao); savePrefs(); toast(ui.ao ? 'Finom árnyékolás (AO) bekapcsolva' : 'AO kikapcsolva – gyorsabb megjelenítés'); };
+    syncToggle('cutawayToggle', 'cutaway'); syncToggle('lampsToggle', 'lampsOn'); syncToggle('aoToggle', 'ao');
+    $('sunAzimuth').value = ui.sunAzimuth;
+    $('sunAzimuth').oninput = event => { ui.sunAzimuth = Number(event.target.value); requestRender(); };
+    $('sunAzimuth').onchange = savePrefs;
+
+    // Variants panel
+    $('duplicateVariant').onclick = () => duplicateVariant();
+    $('newVariant').onclick = newVariant;
+    $('compareVariants').onclick = openCompare;
+    $('saveVersion').onclick = saveVersionPrompt;
+    $('exportJSON').onclick = exportJson;
+    $('importJSON').onchange = event => { const file = event.target.files?.[0]; event.target.value = ''; if (file) importJson(file); };
+
+    // Custom furniture
+    $('customFurniture').onclick = async () => {
+      const answer = await ask('Egyedi méretű bútor', 'Add meg a bútor valós befoglaló méreteit centiméterben.', [
+        { key: 'name', label: 'Megnevezés', value: 'Saját bútor' },
+        { key: 'model', label: 'Megjelenés', value: 'box', options: [['box', 'Egyszerű doboz'], ['sofa', 'Kanapé'], ['table', 'Asztal'], ['dresser', 'Komód / tároló'], ['wardrobe', 'Szekrény'], ['bed', 'Ágy'], ['desk', 'Íróasztal'], ['bookcase', 'Polc'], ['kitchen-base', 'Konyhaszekrény'], ['rug', 'Szőnyeg']] },
+        { key: 'w', label: 'Szélesség (cm)', value: '120', type: 'number' },
+        { key: 'h', label: 'Mélység (cm)', value: '60', type: 'number' },
+        { key: 'height', label: 'Magasság (cm)', value: '80', type: 'number' }
+      ]);
+      if (!answer) return;
+      addProduct({ key: 'custom', source: 'custom', model: answer.model, name: answer.name.trim() || 'Saját bútor', width: Number(answer.w), depth: Number(answer.h), height: Number(answer.height), category: 'storage', materials: Catalog.defaultMaterials(answer.model) });
+    };
+
+    // IKEA dialog
+    Object.entries(Ikea.categories).forEach(([value, label]) => { const option = document.createElement('option'); option.value = value; option.textContent = label; $('ikeaCategory').append(option); });
+    $('importIkea').onclick = () => {
+      resolvedImport = null;
+      $('ikeaForm').reset();
+      $('ikeaManualFields').hidden = true;
+      $('ikeaImportOk').disabled = true;
+      $('ikeaSourceLink').hidden = true;
+      fillImportFields({}, false);
+      $('ikeaImportStatus').className = 'import-status';
+      $('ikeaImportStatus').textContent = 'Nem végzünk háttérben webes adatgyűjtést vagy jogosulatlan scrapinget.';
+      $('ikeaDialog').showModal();
+      setTimeout(() => $('ikeaUrl').focus(), 0);
+    };
+    $('resolveIkea').onclick = resolveIkeaUrl;
+    $('ikeaUrl').addEventListener('keydown', event => { if (event.key === 'Enter') { event.preventDefault(); resolveIkeaUrl(); } });
+    // Editing the link after a check invalidates the earlier result, otherwise the
+    // previously recognised product would be added under the new link.
+    $('ikeaUrl').addEventListener('input', () => {
+      if ($('ikeaManualFields').hidden && $('ikeaImportOk').disabled) return;
+      resolvedImport = null;
+      $('ikeaManualFields').hidden = true;
+      $('ikeaAiRow').hidden = true;
+      $('ikeaImportOk').disabled = true;
+      $('ikeaSourceLink').hidden = true;
+      fillImportFields({}, false);
+      $('ikeaImportStatus').className = 'import-status';
+      $('ikeaImportStatus').textContent = 'A link megváltozott – kattints az Ellenőrzés gombra.';
+    });
+    $('ikeaForm').addEventListener('input', event => {
+      if (event.target.id !== 'ikeaUrl' && $('ikeaImportStatus').classList.contains('error') && !resolvedImport) {
+        $('ikeaImportStatus').className = 'import-status warning';
+        $('ikeaImportStatus').textContent = 'Másold be a termékoldalon szereplő külső méreteket, majd add hozzá a tervhez.';
+      }
+    });
+    $('ikeaForm').addEventListener('submit', event => {
+      if (event.submitter?.value === 'cancel') return;
+      event.preventDefault();
+      try {
+        const product = readImportForm();
+        const added = addProduct(product);
+        if (added && $('ikeaSaveFavorite').checked && !isFavorite(product.productId)) {
+          favorites = Core.saveFavorites(localStorage, [...favorites, Core.normalizeProduct(product)]);
+          renderCatalog();
+        }
+        if (added) $('ikeaDialog').close('import');
+      } catch (error) {
+        $('ikeaImportStatus').className = 'import-status error';
+        $('ikeaImportStatus').textContent = error.message;
+      }
+    });
+
+    // Read-only dialogs also close on a click outside them (on the backdrop).
+    ['exportDialog', 'compareDialog'].forEach(id => {
+      const dialog = $(id);
+      dialog.addEventListener('click', event => {
+        if (event.target !== dialog) return;
+        const r = dialog.getBoundingClientRect();
+        if (event.clientX < r.left || event.clientX > r.right || event.clientY < r.top || event.clientY > r.bottom) dialog.close('cancel');
+      });
+    });
+
+    // Export dialog
+    $('exportButton').onclick = () => { $('exportDialog').showModal(); ui.exportKind = ui.view === '3d' ? 'png3d' : 'png2d'; updateExportPreview(); };
+    document.querySelectorAll('#exportKind button').forEach(button => { button.onclick = () => { ui.exportKind = button.dataset.kind; updateExportPreview(); }; });
+    ['exportPaper', 'exportQuality', 'exportCamera', 'exportBackground', 'exportDims', 'exportLabels', 'exportTitle'].forEach(id => $(id).addEventListener('change', updateExportPreview));
+    $('exportRun').onclick = runExport;
+
+    renderCategoryChips();
+    setLeftTab(ui.leftTab || 'catalog');
+    document.body.classList.remove('panel-open');
+    setTool('select');
+    updateHistoryButtons();
+    setSaveState(true);
+    setView(ui.view || '2d');
+    requestAnimationFrame(() => { fitView(); refreshAll(); });
+    if (data.meta?.migratedFrom && !data.meta.migrationNoticeShown) {
+      data.meta.migrationNoticeShown = true;
+      persist(JSON.stringify(data)); committed = JSON.stringify(data);
+      setTimeout(() => toast('A korábbi terveid átkerültek az új, centiméter-alapú formátumba. Az eredeti adat érintetlen biztonsági másolatként megmaradt.', 7000), 600);
+    } else if (!localStorage.getItem(Core.PLAN_STORAGE_KEY)) {
+      persist(committed);
+    }
+  }
+
+  init();
 })();
